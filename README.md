@@ -8,7 +8,7 @@
 
 ## The Problem
 
-Preference data quality is the binding constraint on alignment work. Published estimates put preference noise above 20% in many widely used RLHF datasets, and alignment performance degrades sharply with noisy or flipped labels. The industry's answer has been post-hoc and sampled: gold tasks, spot checks (~10% inspection rates), inter-annotator agreement thresholds, and statistical filtering after the labels are already bought.
+Preference data quality is the binding constraint on alignment work. Published inter-annotator disagreement on preference labels exceeds 20% in widely used RLHF datasets — roughly 24–27%, given reported agreement rates of ~73–77% (Stiennon et al. 2020; Ouyang et al. 2022). Not all of that is honest disagreement: inattention and LLM-assisted answers hide inside it, and alignment performance degrades sharply with noisy or flipped labels. The industry's answer has been post-hoc and sampled: gold tasks, spot checks (~10% inspection rates), inter-annotator agreement thresholds, and statistical filtering after the labels are already bought.
 
 Two failure modes slip through all of it:
 
