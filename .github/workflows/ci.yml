@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**", "feat/**"]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e '.[dev]'
+      - name: Ruff
+        run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install -e '.[dev]'
+      - name: Tests
+        run: pytest -v
+
+  schema-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e '.[dev]'
+      - name: Produce JSON output and validate against published schema
+        run: |
+          sensie-eval run --sample --output-json results.json
+          python -c "import json, jsonschema; jsonschema.validate(json.load(open('results.json')), json.load(open('schemas/output.schema.json'))); print('results.json conforms to schemas/output.schema.json')"
+
+  readme-walkthrough:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run every README command in order in a fresh venv
+        run: bash scripts/readme_walkthrough.sh

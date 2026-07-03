@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/sensie-app/sensie-eval-harness/main/schemas/output.schema.json",
+  "title": "sensie-eval evaluation output",
+  "description": "Machine-readable results emitted by `sensie-eval run --output-json`.",
+  "type": "object",
+  "required": ["schema_version", "harness_version", "config", "results"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "Version of this output schema.",
+      "const": "1"
+    },
+    "harness_version": {
+      "description": "Version of the sensie-eval package that produced the output.",
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+"
+    },
+    "config": {
+      "type": "object",
+      "required": ["data_source", "train_frac", "seed", "threshold"],
+      "additionalProperties": false,
+      "properties": {
+        "data_source": {
+          "description": "Path of the input dataset, or 'bundled-sample'.",
+          "type": "string"
+        },
+        "train_frac": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "results": {
+      "type": "object",
+      "required": [
+        "n_train_subjects",
+        "n_test_subjects",
+        "accuracy",
+        "precision",
+        "recall",
+        "f1_score",
+        "confusion_matrix",
+        "routing_validity",
+        "reliability_threshold"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "n_train_subjects": { "type": "integer", "minimum": 0 },
+        "n_test_subjects": { "type": "integer", "minimum": 0 },
+        "accuracy": { "type": "number", "minimum": 0, "maximum": 1 },
+        "precision": { "type": "number", "minimum": 0, "maximum": 1 },
+        "recall": { "type": "number", "minimum": 0, "maximum": 1 },
+        "f1_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "confusion_matrix": {
+          "type": "object",
+          "required": ["tp", "fp", "tn", "fn"],
+          "additionalProperties": false,
+          "properties": {
+            "tp": { "type": "integer", "minimum": 0 },
+            "fp": { "type": "integer", "minimum": 0 },
+            "tn": { "type": "integer", "minimum": 0 },
+            "fn": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "routing_validity": {
+          "type": "object",
+          "required": [
+            "high_signal_mean_reliability",
+            "low_signal_mean_reliability",
+            "routing_gap",
+            "p_value",
+            "significant_at_0_05"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "high_signal_mean_reliability": { "type": "number", "minimum": 0, "maximum": 1 },
+            "low_signal_mean_reliability": { "type": "number", "minimum": 0, "maximum": 1 },
+            "routing_gap": { "type": "number", "minimum": -1, "maximum": 1 },
+            "p_value": { "type": "number", "minimum": 0, "maximum": 1 },
+            "significant_at_0_05": { "type": "boolean" }
+          }
+        },
+        "reliability_threshold": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}

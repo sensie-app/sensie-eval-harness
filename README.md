@@ -1,73 +1,134 @@
-# Sensie Eval Harness
+# sensie-eval
 
-### Verify the Human, Not the Label
+Subject-disjoint evaluation harness for motion-biomarker classification. Generates synthetic IMU data with controllable per-subject signal quality, runs a strict subject-disjoint evaluation protocol against it, and emits both a human-readable report and schema-validated JSON. Runs entirely offline — no account, no API key, no network calls.
 
-**Pre-hoc annotator state verification via motion biomarker — evaluation harness for human-data and RLHF platform teams.**
+License: Apache-2.0 (provisional — pending counsel confirmation; see [LICENSE](LICENSE)).
+
+## What the underlying signal is
+
+Sensie measures a smartphone motion signal: a user performs a brief gesture while holding their phone, and the resulting accelerometer and gyroscope streams (100 Hz, 3-axis each) are classified into a state read relative to a stated proposition. The features used derive from involuntary micro-dynamics of the motion, and the classifier is personalized — each user completes a calibration phase, and accuracy is person-variable. In Sensie's internal research trials (9 PhD-led trials, 18,000+ sessions), personalized post-calibration state-classification accuracy was 83.6% among users whose reads lock in. That person-variability is the entire motivation for this harness: if accuracy varies per user, the honest deployment question is not "what is the average accuracy?" but "can you predict, for a *new* user, whether their signal is reliable enough to route on?" — which is exactly what a subject-disjoint evaluation tests. The trial figures are internal and have not been independently replicated; this repository exists so you can inspect and exercise the evaluation methodology yourself.
+
+## Quickstart
+
+```bash
+git clone https://github.com/sensie-app/sensie-eval-harness
+cd sensie-eval-harness
+pip install .
+sensie-eval run --sample --output-json results.json
+python -m json.tool results.json
+```
+
+`--sample` uses a small synthetic dataset bundled with the package (32 subjects, 3 gesture repetitions each), so the command works with no downloads and no network access. The console report shows the train/test split, held-out classification accuracy, and the routing-validity gap; `results.json` contains the same numbers in the machine-readable format described below.
+
+## Reading the output
+
+The evaluation splits subjects into disjoint calibration (train) and evaluation (test) sets — no subject appears in both. For each held-out subject it computes a **signal reliability score** (cross-repetition correlation of the raw IMU streams) and classifies the subject as high-signal or low-signal against a threshold. It then reports:
+
+- **Classification metrics** — accuracy, precision, recall, F1, and a confusion matrix of predicted vs. true signal quality (true labels come from the synthetic generator's latent quality parameter).
+- **Routing validity** — the mean reliability gap between the truly-high-signal and truly-low-signal cohorts, with a Mann-Whitney U test. A positive, significant gap means the reliability score orders unseen subjects correctly, i.e. it would be valid to route on.
+- **PASS/FAIL banner** — pre-set methodology thresholds (accuracy ≥ 70%, significant routing gap > 0.1) applied to the run. On synthetic data these are demonstrations of the protocol, not claims about real humans.
+
+## Generating your own data
+
+The generator gives every synthetic subject a latent `signal_quality` in [0, 1] that controls how reproducibly their gesture renders through noise (white noise, low-frequency drift, and a 16-bit quantization floor):
+
+```bash
+sensie-eval generate --n-subjects 50 --n-repetitions 5 --noise 0.3 --seed 1 --output my_data.npz
+sensie-eval run --data my_data.npz --train-frac 0.7 --seed 42 --threshold 0.5 --output-json my_results.json
+```
+
+### CLI reference
+
+| Command | Flag | Default | Meaning |
+|---|---|---|---|
+| `generate` | `--n-subjects` | 50 | Number of synthetic subjects |
+| | `--n-repetitions` | 5 | Gesture repetitions per subject |
+| | `--duration` | 4.0 | Gesture duration in seconds (100 Hz sample rate) |
+| | `--noise` | 0.15 | Base noise level applied to quality-0 subjects |
+| | `--seed` | 42 | RNG seed |
+| | `--output` | — | Output `.npz` path (omit to print a summary only) |
+| `run` | `--data` / `--sample` | — | Dataset path, or the bundled sample (exactly one required) |
+| | `--train-frac` | 0.7 | Fraction of subjects used for calibration |
+| | `--seed` | 42 | Seed for the subject-disjoint split |
+| | `--threshold` | 0.5 | Reliability threshold for high/low-signal classification |
+| | `--output-json` | — | Write machine-readable results to this path |
+
+## Data format
+
+Datasets are compressed NumPy archives (`.npz`) with a flat key layout, so you can build them from your own IMU recordings without this package:
+
+| Key pattern | Value |
+|---|---|
+| `subject_<id>_quality` | scalar float in [0, 1] — ground-truth signal quality |
+| `subject_<id>_rep_<n>_accel` | `(3, N)` float array, m/s², 100 Hz |
+| `subject_<id>_rep_<n>_gyro` | `(3, N)` float array, rad/s, 100 Hz |
+
+`<id>` is a 1-indexed integer, `<n>` is a 0-indexed repetition. Every subject needs at least 2 repetitions for a meaningful reliability score.
+
+## Machine-readable output (`--output-json`)
+
+The JSON document conforms to [`schemas/output.schema.json`](schemas/output.schema.json) (JSON Schema 2020-12). Top level:
+
+- `schema_version` — output schema version, currently `"1"`
+- `harness_version` — the `sensie-eval` package version
+- `config` — `data_source`, `train_frac`, `seed`, `threshold`
+- `results` — all metrics from the console report: subject counts, `accuracy`, `precision`, `recall`, `f1_score`, `confusion_matrix`, and `routing_validity` (cohort means, `routing_gap`, `p_value`, `significant_at_0_05`)
+
+To validate a results file against the schema:
+
+```bash
+pip install jsonschema
+python -c "import json, jsonschema; jsonschema.validate(json.load(open('results.json')), json.load(open('schemas/output.schema.json'))); print('results.json: valid')"
+```
+
+The schema is validated in CI on every run, and `schema_version` will change if the format ever changes incompatibly.
+
+## Python API
+
+Everything the CLI does is importable:
+
+```python
+from sensie_eval import (
+    generate_subject_dataset,
+    evaluate_subject_disjoint,
+    compute_signal_reliability,
+    save_dataset,
+    load_dataset,
+)
+
+subjects = generate_subject_dataset(n_subjects=40, n_repetitions=3, seed=7)
+results = evaluate_subject_disjoint(subjects, train_frac=0.7, seed=42, threshold=0.5)
+print(f"accuracy={results['accuracy']:.3f}",
+      f"routing_gap={results['routing_validity']['routing_gap']:.3f}")
+```
+
+## Limitations — read this before drawing conclusions
+
+- **All bundled and generated data is synthetic.** Nothing this harness outputs is evidence about real human subjects. The ground-truth labels are the generator's own latent parameter, so the classification task is solvable by construction — the harness demonstrates the *evaluation protocol*, not classifier capability.
+- **The reliability scorer is a baseline, not the production system.** It is a plain cross-repetition correlation. Sensie's production classifier, features, and weights are not in this repository, and results here do not transfer to it.
+- **The PASS/FAIL banner is a methodology demo.** Thresholds are applied to synthetic data whose difficulty you control via `--noise`; you can make any run pass or fail.
+- **The 83.6% figure is internal.** It is personalized, post-calibration, and measured on users whose reads lock in — population-level accuracy before calibration is lower, and the figure has not been independently replicated.
+- **Subject-disjoint on synthetic data is a lower bar than real deployment.** Real-world factors (device variance, gesture drift over time, adversarial users) are not modeled by this generator.
+- **No network API is included.** This release is offline-only tooling; evaluation against a live classifier is not part of this package.
+
+## What this repository does NOT contain
+
+No model weights, no training data, no feature definitions, and no production inference or scoring logic. All classification in this repository is the placeholder correlation baseline described above.
+
+## Development
+
+```bash
+pip install -e '.[dev]'
+ruff check .
+pytest
+```
+
+CI (GitHub Actions) runs lint, the test suite, a scripted end-to-end walkthrough of every command in this README (`scripts/readme_walkthrough.sh`), and JSON-schema validation of the harness output. The bundled sample dataset is regenerated deterministically by `scripts/make_sample_data.py`.
+
+## License
+
+Apache-2.0 (provisional — the license choice is pending final counsel confirmation; the full text is in [LICENSE](LICENSE) and applies as published unless this note is removed in a future release).
 
 ---
 
-## The Problem
-
-Preference data quality is the binding constraint on alignment work. Published inter-annotator disagreement on preference labels exceeds 20% in widely used RLHF datasets — roughly 24–27%, given reported agreement rates of ~73–77% (Stiennon et al. 2020; Ouyang et al. 2022). Not all of that is honest disagreement: inattention and LLM-assisted answers hide inside it, and alignment performance degrades sharply with noisy or flipped labels. The industry's answer has been post-hoc and sampled: gold tasks, spot checks (~10% inspection rates), inter-annotator agreement thresholds, and statistical filtering after the labels are already bought.
-
-Two failure modes slip through all of it:
-
-1. **Inattention and fatigue.** Preference annotation is cognitively expensive. A disengaged annotator produces plausible-looking labels that pass surface QA and poison the reward model anyway.
-2. **LLM-assisted completion.** An annotator pasting tasks into a frontier model produces output that is, by construction, indistinguishable from engaged human judgment at the label level. Output review cannot catch it, because the output is the disguise.
-
-Both failure modes share a root: **all existing QA inspects the label. None of it inspects the human.**
-
-## What Sensie Measures
-
-Sensie is a smartphone motion-based biomarker — no wearable, no camera, no added hardware. The annotator performs a brief gesture while holding their phone; accelerometer and gyroscope data from the involuntary components of that motion are classified into a nervous-system state read relative to a stated proposition.
-
-Properties that matter:
-
-- **Involuntary signal.** The classified features derive from micro-dynamics of motion the user does not consciously control. It cannot be performed by a language model, scripted, or faked by an inattentive user going through the motions — degraded engagement degrades the signal itself.
-- **Per-user calibrated models.** Each user runs through a multi-stage calibration; classification is personalized, not population-average.
-- **Server-side only.** No model ships on device. The read is computed against Sensie's trained classifier and 18,000+ session labeled dataset.
-- **A routing layer, not a polygraph.** The core product is a **pre-screen**: before an annotator's labels enter your pipeline, Sensie predicts per-user signal reliability and routes accordingly ("reads clearly" vs. "still calibrating"). You pay for verified reads from high-signal humans, not for hope.
-
-## Evidence Base
-
-- 9 PhD-led research trials across 18,000+ sessions
-- 83.6% state-classification accuracy on calibrated users (personalized, post-calibration — the real-conditions figure; accuracy is person-variable and rises with calibration, which is precisely why the pre-screen/routing layer exists)
-- Two granted US utility patents plus one additional filing covering the gesture biomarker and classification system
-- Trials led and advised by researchers affiliated with Harvard Medical School and Oxford (DPhil)
-
-## About This Repository
-
-This repository contains a **subject-disjoint evaluation harness** for benchmarking motion-biomarker classification systems against synthetic data. It is designed to let technical teams independently assess the methodology before committing to a paid pilot.
-
-**Note on PASS/FAIL output:** The harness prints PASS/FAIL at the end of each run. This banner demonstrates the evaluation methodology (pre-registered thresholds applied to a subject-disjoint split) — it operates on synthetic data only and does not represent performance on real human subjects. All PASS/FAIL results are artifacts of the synthetic data generator's configurable noise parameters.
-
-The harness generates synthetic IMU streams (100Hz accelerometer + gyroscope, 3-axis) with configurable subject-specific signal characteristics and noise profiles. It then evaluates classification performance under a strict subject-disjoint protocol — models are calibrated on one set of synthetic subjects and tested on a held-out set they have never seen. This mirrors the real-world deployment: Sensie calibrates per-user and routes new users through a pre-screen before accepting their reads.
-
-### What this repo contains
-
-- **`src/generate_synthetic_imu.py`** — Produces synthetic IMU data streams matching the sensor spec (100Hz, 3-axis accelerometer + gyroscope) with configurable noise levels per subject.
-- **`src/evaluate.py`** — Loads synthetic data and computes subject-disjoint evaluation metrics: per-subject signal reliability scoring, cohort-level classification accuracy, and routing validity (gap between high-signal and low-signal cohorts).
-- **`tests/`** — Unit tests validating the generation and evaluation pipeline.
-- **`requirements.txt`** — Minimal dependencies: `numpy` and `scipy` only.
-
-### What this repo does NOT contain
-
-This is an evaluation scaffold, not a model release. It contains **no model weights, no training data, no feature definitions, and no CFD feature families.** All classification logic is server-side at Sensie; this harness lets you validate the *methodology* — subject-disjoint evaluation, signal reliability scoring, and routing validity — against synthetic data you control.
-
-## The Pilot
-
-The next step after evaluating this harness is a fixed-scope, pre-registered pilot:
-
-- **Structure:** 4–6 weeks. Run on Sensie's managed, pre-screened panel — zero integration work or annotator disruption on your side.
-- **Primary endpoint:** Filtering to verified reads from high-signal users reduces label disagreement/error rate versus the unfiltered panel by ≥30% relative on gold-anchored tasks.
-- **Secondary endpoint:** The pre-screen's high-signal cohort outperforms the low-signal cohort by a pre-agreed margin, demonstrating the score predicts label quality.
-- **Price:** $25,000, paid, fixed.
-- **On success:** Pilot converts to a customer-funded Phase 2 — SDK integration into your annotator workforce, scoped as a paid SOW plus production pricing on a two-part tariff.
-
-Pass = primary endpoint met + operational gate met. All thresholds are negotiated and locked before data collection; no post-hoc goalpost movement.
-
----
-
-**Sensie, LLC** · joinsensie.com · mike@joinsensie.com
-
-*"Every existing QA inspects the label. Sensie inspects the human."*
+A hosted service that runs this same evaluation protocol against Sensie's production classifier is available at [joinsensie.com](https://joinsensie.com).
