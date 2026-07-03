@@ -1,32 +1,29 @@
-"""
-evaluate.py — Subject-Disjoint Evaluation Harness
+"""Subject-disjoint evaluation metrics.
 
-Loads synthetic IMU data and computes subject-disjoint evaluation metrics
-matching the pre-registered pilot endpoints:
+Loads IMU datasets (synthetic, or your own data in the same .npz layout)
+and computes subject-disjoint evaluation metrics:
 
   1. Per-subject signal reliability scoring
   2. Subject-disjoint classification accuracy
   3. Routing validity (high-signal vs. low-signal cohort gap)
 
-IP GUARDRAIL: This is a metrics skeleton. It contains NO real feature
-definitions, NO model code, NO training data, and NO CFD feature families.
-Uses only numpy/scipy — no ML frameworks. All classification logic is a
-placeholder; real classification runs server-side at Sensie.
-
-Usage:
-    python evaluate.py --data path/to/synthetic_data.npz --train_frac 0.7
+IP note: this is a metrics skeleton. It contains NO real feature
+definitions, NO model code, and NO training data. The reliability scorer
+here is a simple cross-repetition correlation baseline; it exists to
+demonstrate the evaluation methodology, not to reproduce any production
+classifier.
 """
 
-import argparse
+from typing import Dict, List, Tuple
+
 import numpy as np
 from scipy import stats
-from typing import Dict, List, Tuple
 
 
 def load_dataset(filepath: str) -> List[Dict]:
     """
-    Load a synthetic dataset from a .npz file (produced by
-    generate_synthetic_imu.py).
+    Load a dataset from a .npz file (produced by ``sensie-eval generate``
+    or :func:`sensie_eval.generate.save_dataset`).
 
     Returns a list of subject dicts with keys: subject_id, signal_quality,
     repetitions (list of {"accel": array, "gyro": array}).
@@ -34,7 +31,7 @@ def load_dataset(filepath: str) -> List[Dict]:
     archive = np.load(filepath, allow_pickle=False)
 
     # Parse the flat key structure back into subject-organized data
-    subjects = {}
+    subjects: Dict[int, Dict] = {}
     for key in archive.files:
         parts = key.split("_")
         if parts[0] != "subject":
@@ -69,9 +66,7 @@ def load_dataset(filepath: str) -> List[Dict]:
     return result
 
 
-def compute_signal_reliability(
-    subject: Dict,
-) -> float:
+def compute_signal_reliability(subject: Dict) -> float:
     """
     Compute a per-subject signal reliability score.
 
@@ -124,18 +119,17 @@ def subject_disjoint_split(
     Split subjects into disjoint train and test sets.
 
     This is the key subject-disjoint constraint: no subject appears in both
-    sets. This mirrors real deployment where Sensie calibrates per-user on
-    a known set and evaluates routing on new users.
+    sets. Calibration happens on a known set of subjects; evaluation happens
+    on subjects the system has never seen.
     """
     rng = np.random.RandomState(seed)
     n_train = max(1, int(len(subjects) * train_frac))
 
     indices = rng.permutation(len(subjects))
     train_idx = set(indices[:n_train].tolist())
-    test_idx = set(indices[n_train:].tolist())
 
     train_subjects = [subjects[i] for i in range(len(subjects)) if i in train_idx]
-    test_subjects = [subjects[i] for i in range(len(subjects)) if i in test_idx]
+    test_subjects = [subjects[i] for i in range(len(subjects)) if i not in train_idx]
 
     return train_subjects, test_subjects
 
@@ -148,10 +142,9 @@ def classify_subject(
     Classify a subject as high-signal (1) or low-signal (0) based on
     signal reliability score.
 
-    In real Sensie deployment, this classification runs server-side using
-    the proprietary calibrated model. Here it's a simple threshold on the
-    reliability score — sufficient for evaluating the subject-disjoint
-    methodology against synthetic data.
+    This is a simple threshold on the cross-repetition reliability score —
+    a baseline sufficient for exercising the subject-disjoint methodology
+    against synthetic data. It is not a production classifier.
     """
     reliability = compute_signal_reliability(subject)
     predicted = 1 if reliability >= threshold else 0
@@ -162,11 +155,12 @@ def evaluate_subject_disjoint(
     subjects: List[Dict],
     train_frac: float = 0.7,
     seed: int = 42,
+    threshold: float = 0.5,
 ) -> Dict:
     """
     Run full subject-disjoint evaluation.
 
-    Computes the metrics that map to the pre-registered pilot endpoints:
+    Computes:
       1. Classification accuracy on held-out subjects
       2. Routing validity: high-signal vs. low-signal cohort gap
       3. Per-cohort signal reliability statistics
@@ -179,6 +173,8 @@ def evaluate_subject_disjoint(
         Fraction of subjects for calibration/training.
     seed : int
         Random seed for the train/test split.
+    threshold : float
+        Reliability threshold for high/low-signal classification.
 
     Returns
     -------
@@ -195,7 +191,7 @@ def evaluate_subject_disjoint(
     ground_truth = []
 
     for subject in test_subjects:
-        pred, rel = classify_subject(subject, threshold=0.5)
+        pred, rel = classify_subject(subject, threshold=threshold)
         predictions.append(pred)
         reliabilities.append(rel)
 
@@ -236,9 +232,7 @@ def evaluate_subject_disjoint(
     else:
         routing_gap = 0.0
         p_value = 1.0
-        u_stat = 0.0
 
-    # Per-cohort stats
     results = {
         "n_train_subjects": len(train_subjects),
         "n_test_subjects": len(test_subjects),
@@ -247,20 +241,55 @@ def evaluate_subject_disjoint(
         "recall": float(recall),
         "f1_score": float(f1),
         "confusion_matrix": {
-            "tp": int(tp), "fp": int(fp),
-            "tn": int(tn), "fn": int(fn),
+            "tp": int(tp),
+            "fp": int(fp),
+            "tn": int(tn),
+            "fn": int(fn),
         },
         "routing_validity": {
-            "high_signal_mean_reliability": float(np.mean(high_reliabilities)) if len(high_reliabilities) > 0 else 0.0,
-            "low_signal_mean_reliability": float(np.mean(low_reliabilities)) if len(low_reliabilities) > 0 else 0.0,
+            "high_signal_mean_reliability": (
+                float(np.mean(high_reliabilities)) if len(high_reliabilities) > 0 else 0.0
+            ),
+            "low_signal_mean_reliability": (
+                float(np.mean(low_reliabilities)) if len(low_reliabilities) > 0 else 0.0
+            ),
             "routing_gap": float(routing_gap),
             "p_value": float(p_value),
             "significant_at_0_05": bool(p_value < 0.05),
         },
-        "reliability_threshold": 0.5,
+        "reliability_threshold": float(threshold),
     }
 
     return results
+
+
+def build_json_output(results: Dict, config: Dict) -> Dict:
+    """
+    Build the machine-readable output document for ``--output-json``.
+
+    The returned dict conforms to ``schemas/output.schema.json``.
+
+    Parameters
+    ----------
+    results : dict
+        Metrics from :func:`evaluate_subject_disjoint`.
+    config : dict
+        Run configuration: data_source (str), train_frac (float),
+        seed (int), threshold (float).
+    """
+    from sensie_eval import __version__
+
+    return {
+        "schema_version": "1",
+        "harness_version": __version__,
+        "config": {
+            "data_source": str(config["data_source"]),
+            "train_frac": float(config["train_frac"]),
+            "seed": int(config["seed"]),
+            "threshold": float(config["threshold"]),
+        },
+        "results": results,
+    }
 
 
 def print_report(results: Dict) -> None:
@@ -268,8 +297,10 @@ def print_report(results: Dict) -> None:
     print("=" * 60)
     print("SUBJECT-DISJOINT EVALUATION REPORT")
     print("=" * 60)
-    print(f"\nSplit: {results['n_train_subjects']} train / "
-          f"{results['n_test_subjects']} test subjects")
+    print(
+        f"\nSplit: {results['n_train_subjects']} train / "
+        f"{results['n_test_subjects']} test subjects"
+    )
     print(f"\nClassification (threshold={results['reliability_threshold']}):")
     print(f"  Accuracy:  {results['accuracy']:.3f}")
     print(f"  Precision: {results['precision']:.3f}")
@@ -277,65 +308,21 @@ def print_report(results: Dict) -> None:
     print(f"  F1 Score:  {results['f1_score']:.3f}")
 
     cm = results["confusion_matrix"]
-    print(f"\nConfusion Matrix:")
+    print("\nConfusion Matrix:")
     print(f"  TP={cm['tp']:3d}  FP={cm['fp']:3d}")
     print(f"  FN={cm['fn']:3d}  TN={cm['tn']:3d}")
 
     rv = results["routing_validity"]
-    print(f"\nRouting Validity:")
+    print("\nRouting Validity:")
     print(f"  High-signal cohort mean reliability: {rv['high_signal_mean_reliability']:.3f}")
     print(f"  Low-signal cohort mean reliability:  {rv['low_signal_mean_reliability']:.3f}")
     print(f"  Routing gap:                         {rv['routing_gap']:.3f}")
     print(f"  p-value (Mann-Whitney U):            {rv['p_value']:.4f}")
-    print(f"  Significant at α=0.05:               {rv['significant_at_0_05']}")
-
-    print("\nPilot Endpoint Mapping:")
-    print(f"  Primary (noise reduction proxy):     Accuracy={results['accuracy']:.1%}")
-    print(f"  Secondary (cohort gap):              Gap={rv['routing_gap']:.3f}, "
-          f"p={rv['p_value']:.4f}")
+    print(f"  Significant at alpha=0.05:           {rv['significant_at_0_05']}")
 
     noise_reduction_passes = results["accuracy"] >= 0.70
     routing_passes = rv["significant_at_0_05"] and rv["routing_gap"] > 0.1
-    print(f"\nPre-registered thresholds (synthetic baseline):")
-    print(f"  Accuracy ≥ 70%:     {'PASS' if noise_reduction_passes else 'FAIL'}")
+    print("\nMethodology thresholds (synthetic baseline — see README):")
+    print(f"  Accuracy >= 70%:    {'PASS' if noise_reduction_passes else 'FAIL'}")
     print(f"  Routing gap valid:  {'PASS' if routing_passes else 'FAIL'}")
     print("=" * 60)
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Subject-disjoint evaluation of synthetic IMU biomarker data."
-    )
-    parser.add_argument(
-        "--data", type=str, required=True,
-        help="Path to synthetic .npz file from generate_synthetic_imu.py"
-    )
-    parser.add_argument(
-        "--train_frac", type=float, default=0.7,
-        help="Fraction of subjects for calibration (default: 0.7)"
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed for train/test split (default: 42)"
-    )
-    parser.add_argument(
-        "--threshold", type=float, default=0.5,
-        help="Reliability threshold for classification (default: 0.5)"
-    )
-    args = parser.parse_args()
-
-    subjects = load_dataset(args.data)
-    print(f"Loaded {len(subjects)} subjects from {args.data}")
-
-    results = evaluate_subject_disjoint(
-        subjects,
-        train_frac=args.train_frac,
-        seed=args.seed,
-    )
-    results["reliability_threshold"] = args.threshold
-
-    print_report(results)
-
-
-if __name__ == "__main__":
-    main()

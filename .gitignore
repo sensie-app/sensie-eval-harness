@@ -2,4 +2,10 @@ __pycache__/
 *.pyc
 *.pyo
 *.npz
+!src/sensie_eval/data/sample_dataset.npz
 .DS_Store
+*.egg-info/
+build/
+dist/
+.venv/
+results.json

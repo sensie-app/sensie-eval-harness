@@ -1,28 +1,23 @@
-"""
-generate_synthetic_imu.py — Synthetic IMU Data Generator
+"""Synthetic IMU data generator.
 
 Produces synthetic accelerometer and gyroscope streams matching the sensor
-specification: 100 Hz sample rate, 3-axis per sensor, with configurable
-subject-specific noise levels.
+specification used by the harness: 100 Hz sample rate, 3-axis per sensor,
+with configurable subject-specific noise levels.
 
-This generates data for subject-disjoint evaluation: each synthetic subject
-has a latent "signal quality" parameter that governs how clearly their
-motion signal can be classified. High-signal subjects produce clean,
-separable gesture patterns; low-signal subjects produce noisy, ambiguous
-streams. This mirrors the real-world deployment where Sensie routes
-high-signal annotators and filters out low-signal ones.
+Each synthetic subject has a latent ``signal_quality`` parameter in [0, 1]
+that governs how clearly their motion signal reproduces across repetitions.
+High-quality subjects produce clean, reproducible gesture patterns;
+low-quality subjects produce noisy, ambiguous streams. This lets the
+evaluation demonstrate subject-disjoint routing methodology end-to-end on
+data you fully control.
 
-IP GUARDRAIL: Synthetic data only. No real feature definitions, no model
-code, no training data, no CFD feature families. Uses only numpy — no ML
-frameworks.
-
-Usage:
-    python generate_synthetic_imu.py --n_subjects 50 --duration 4.0 --noise 0.1
+IP note: synthetic data only. No real feature definitions, no model code,
+no training data. Uses only numpy — no ML frameworks.
 """
 
-import argparse
+from typing import Dict, List
+
 import numpy as np
-from typing import Dict, Tuple
 
 
 def generate_gesture_template(
@@ -68,11 +63,13 @@ def generate_gesture_template(
 
         # Each pulse has a characteristic 3D direction (the whip motion)
         phase = 2 * np.pi * (center / pulse_centers[-1])
-        axis_weights = np.array([
-            np.cos(phase),
-            np.sin(phase),
-            0.3 * np.sin(2 * phase),
-        ])
+        axis_weights = np.array(
+            [
+                np.cos(phase),
+                np.sin(phase),
+                0.3 * np.sin(2 * phase),
+            ]
+        )
 
         for axis in range(3):
             accel[axis] += envelope * axis_weights[axis]
@@ -156,13 +153,12 @@ def generate_subject_dataset(
     sample_rate: float = 100.0,
     base_noise: float = 0.15,
     seed: int = 42,
-) -> list:
+) -> List[Dict]:
     """
     Generate a full synthetic dataset with multiple subjects.
 
     Each subject has:
-      - A latent signal_quality value (uniform [0, 1], representing the
-        spectrum from "reads clearly" to "still calibrating")
+      - A latent signal_quality value (uniform [0, 1])
       - n_repetitions of the gesture, each with independent noise draws
       - A subject label (1-indexed integer)
 
@@ -215,86 +211,50 @@ def generate_subject_dataset(
             )
             repetitions.append(noisy)
 
-        dataset.append({
-            "subject_id": subj_idx + 1,
-            "signal_quality": quality,
-            "repetitions": repetitions,
-        })
+        dataset.append(
+            {
+                "subject_id": subj_idx + 1,
+                "signal_quality": quality,
+                "repetitions": repetitions,
+            }
+        )
 
     return dataset
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate synthetic IMU data for subject-disjoint evaluation."
-    )
-    parser.add_argument(
-        "--n_subjects", type=int, default=50,
-        help="Number of synthetic subjects (default: 50)"
-    )
-    parser.add_argument(
-        "--duration", type=float, default=4.0,
-        help="Gesture duration in seconds (default: 4.0)"
-    )
-    parser.add_argument(
-        "--noise", type=float, default=0.15,
-        help="Base noise level (default: 0.15)"
-    )
-    parser.add_argument(
-        "--n_repetitions", type=int, default=5,
-        help="Repetitions per subject (default: 5)"
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed (default: 42)"
-    )
-    parser.add_argument(
-        "--output", type=str, default=None,
-        help="Output .npz path (default: print summary only)"
-    )
-    args = parser.parse_args()
+def save_dataset(dataset: List[Dict], filepath: str) -> None:
+    """
+    Save a dataset to a compressed .npz archive readable by
+    :func:`sensie_eval.evaluate.load_dataset`.
 
-    dataset = generate_subject_dataset(
-        n_subjects=args.n_subjects,
-        n_repetitions=args.n_repetitions,
-        duration=args.duration,
-        sample_rate=100.0,
-        base_noise=args.noise,
-        seed=args.seed,
-    )
+    The archive uses a flat key structure:
+      - ``subject_<id>_quality`` — scalar signal quality
+      - ``subject_<id>_rep_<n>_accel`` / ``..._gyro`` — (3, N) streams
+    """
+    save_dict: Dict[str, np.ndarray] = {}
+    for s in dataset:
+        save_dict[f"subject_{s['subject_id']}_quality"] = np.array(s["signal_quality"])
+        for r_idx, rep in enumerate(s["repetitions"]):
+            for sensor in ("accel", "gyro"):
+                key = f"subject_{s['subject_id']}_rep_{r_idx}_{sensor}"
+                save_dict[key] = rep[sensor]
 
-    # Summary statistics
+    np.savez_compressed(filepath, **save_dict)
+
+
+def print_generation_summary(dataset: List[Dict], duration: float, n_repetitions: int) -> None:
+    """Print summary statistics for a generated dataset."""
     qualities = [s["signal_quality"] for s in dataset]
     n_samples = dataset[0]["repetitions"][0]["accel"].shape[1]
 
     print(f"Generated {len(dataset)} subjects")
-    print(f"  Duration: {args.duration}s @ 100 Hz → {n_samples} samples/stream")
-    print(f"  Repetitions per subject: {args.n_repetitions}")
+    print(f"  Duration: {duration}s @ 100 Hz -> {n_samples} samples/stream")
+    print(f"  Repetitions per subject: {n_repetitions}")
     print(f"  Signal quality range: [{min(qualities):.3f}, {max(qualities):.3f}]")
     print(f"  Mean signal quality: {np.mean(qualities):.3f}")
 
-    # Subject distribution for routing bands
     high_signal = sum(1 for q in qualities if q >= 0.6)
     low_signal = sum(1 for q in qualities if q < 0.4)
     print(f"  High-signal subjects (q >= 0.6): {high_signal}")
     print(f"  Low-signal subjects (q < 0.4):  {low_signal}")
     print(f"  Indeterminate subjects:         {len(dataset) - high_signal - low_signal}")
-
-    if args.output:
-        # Save as compressed numpy archive
-        save_dict: dict = {}
-        for s in dataset:
-            save_dict[f"subject_{s['subject_id']}_quality"] = (
-                np.array(s["signal_quality"])
-            )
-            for r_idx, rep in enumerate(s["repetitions"]):
-                for sensor in ("accel", "gyro"):
-                    key = f"subject_{s['subject_id']}_rep_{r_idx}_{sensor}"
-                    save_dict[key] = rep[sensor]
-
-        np.savez_compressed(args.output, **save_dict)
-        print(f"\nSaved dataset to {args.output}")
-
-
-if __name__ == "__main__":
-    main()
