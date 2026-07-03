@@ -20,6 +20,8 @@ python -m json.tool results.json
 
 `--sample` uses a small synthetic dataset bundled with the package (32 subjects, 3 gesture repetitions each), so the command works with no downloads and no network access. The console report shows the train/test split, held-out classification accuracy, and the routing-validity gap; `results.json` contains the same numbers in the machine-readable format described below.
 
+> The bundled sample is synthetic data with parameters chosen to demonstrate the evaluation methodology. Effect sizes and accuracy are illustrative of the harness, not representative of the real somatic signal — real-signal evaluation requires live reads via the hosted API.
+
 ## Reading the output
 
 The evaluation splits subjects into disjoint calibration (train) and evaluation (test) sets — no subject appears in both. For each held-out subject it computes a **signal reliability score** (cross-repetition correlation of the raw IMU streams) and classifies the subject as high-signal or low-signal against a threshold. It then reports:

@@ -65,6 +65,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     subjects = load_dataset(data_path)
     print(f"Loaded {len(subjects)} subjects from {data_source}")
+    if args.sample:
+        print(
+            "NOTE: The bundled sample is synthetic data with parameters chosen to\n"
+            "demonstrate the evaluation methodology. Effect sizes and accuracy are\n"
+            "illustrative of the harness, not representative of the real somatic\n"
+            "signal — real-signal evaluation requires live reads via the hosted API."
+        )
 
     results = evaluate_subject_disjoint(
         subjects,
