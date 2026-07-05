@@ -45,10 +45,60 @@ The harness generates synthetic IMU streams (100Hz accelerometer + gyroscope, 3-
 
 ### What this repo contains
 
+- **`src/sensie_eval/`** — The installable `sensie-eval` package: synthetic IMU generation, subject-disjoint evaluation, the CLI, and an optional live-API client.
 - **`src/generate_synthetic_imu.py`** — Produces synthetic IMU data streams matching the sensor spec (100Hz, 3-axis accelerometer + gyroscope) with configurable noise levels per subject.
 - **`src/evaluate.py`** — Loads synthetic data and computes subject-disjoint evaluation metrics: per-subject signal reliability scoring, cohort-level classification accuracy, and routing validity (gap between high-signal and low-signal cohorts).
+- **`docs/`** — [Quickstart](docs/quickstart.md), [API reference](docs/api-reference.md), [quota & limits](docs/quota-limits.md), [troubleshooting](docs/troubleshooting.md).
 - **`tests/`** — Unit tests validating the generation and evaluation pipeline.
 - **`requirements.txt`** — Minimal dependencies: `numpy` and `scipy` only.
+
+## Run It
+
+Offline, on synthetic data you control — no account, no network:
+
+```bash
+pip install sensie-eval
+sensie-eval run
+```
+
+The offline run generates synthetic subjects, evaluates them under the subject-disjoint protocol, and prints the report with the PASS/FAIL banner described above.
+
+## Run against the live API
+
+The same CLI can post summary reads to Sensie's live API, so you can see the metered read path — session creation, reads, and quota transparency — before committing to anything.
+
+1. Get a free trial key at **https://somabets.com/trial** (email verification, no credit card). The key is shown exactly once: `sk_sensie_<64 hex>`. Trial terms: **100 reads per rolling 7-day window, one trial per email, ever.**
+
+2. Export it and run:
+
+<!-- doctest: api -->
+```bash
+export SENSIE_API_KEY=sk_sensie_your_key_here
+sensie-eval run --api
+```
+
+This runs the offline evaluation first, then creates a session and posts 5 summary reads (change with `--reads N`). Expected output ends with:
+
+```text
+Live API summary
+----------------------------------------
+  Session id:      <uuid>
+  Reads posted:    5
+  Reads returned:  5
+  ...
+```
+
+3. When the quota is exhausted, the API returns a structured **HTTP 429** — this is deliberate quota transparency, not an error to debug:
+
+```text
+Trial quota exhausted (HTTP 429).
+  Used 100 of 100 reads in the current rolling 7-day window.
+  Window resets at: 2026-07-12T00:00:00+00:00
+```
+
+The `window_reset_at` timestamp is when the oldest counted read ages out of the rolling window; clients self-schedule retries from it. Details in [docs/quota-limits.md](docs/quota-limits.md).
+
+**Privacy note:** live mode sends only three scalar summary values per read (`whips`, `flowing`, `agreement`). Raw accelerometer/gyroscope arrays never leave your machine — the trial tier rejects raw motion at the API boundary.
 
 ### What this repo does NOT contain
 

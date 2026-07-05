@@ -3,3 +3,8 @@ __pycache__/
 *.pyo
 *.npz
 .DS_Store
+venv/
+.pytest_cache/
+dist/
+*.egg-info
+build/
