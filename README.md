@@ -54,7 +54,18 @@ The harness generates synthetic IMU streams (100Hz accelerometer + gyroscope, 3-
 
 ## Run It
 
-Offline, on synthetic data you control — no account, no network:
+Offline, on synthetic data you control — no account, no network.
+
+macOS (recommended — Homebrew Python blocks bare `pip install`):
+
+<!-- doctest: macos -->
+```bash
+brew install pipx
+pipx install sensie-eval
+sensie-eval run
+```
+
+Linux / CI / inside a virtualenv:
 
 ```bash
 pip install sensie-eval

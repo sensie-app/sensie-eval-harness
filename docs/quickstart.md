@@ -6,6 +6,17 @@ Two paths: offline (no account, ~2 minutes) and live API (trial key, ~5 minutes)
 
 Requires Python ≥ 3.10.
 
+**macOS (recommended):** Homebrew's Python blocks bare `pip install` into the system environment, so use pipx — it gives the CLI its own isolated env:
+
+<!-- doctest: macos -->
+```bash
+brew install pipx
+pipx install sensie-eval
+sensie-eval run
+```
+
+**Anywhere with a virtualenv (Linux, CI, or if you prefer pip):**
+
 ```bash
 pip install sensie-eval
 sensie-eval run
@@ -42,8 +53,9 @@ export SENSIE_API_KEY=sk_sensie_your_key_here
 sensie-eval run --api
 ```
 
-The CLI runs the offline evaluation first, then:
-- creates a session (`POST /sdk-api/session`),
+The CLI:
+- verifies your key by creating a session up front (`POST /sdk-api/session`, unmetered) — a bad key fails here in seconds,
+- runs the offline evaluation,
 - posts 5 summary reads derived from the held-out subjects (`POST /sdk-api/session/{id}/sensie`) — each one counts against your quota,
 - lists them back (`GET /sdk-api/session/{id}/sensie`),
 - prints a summary table.

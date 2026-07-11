@@ -34,6 +34,15 @@ run_block() {
     echo "SKIP  $label (api block; SENSIE_API_KEY not set)"
     SKIP=$((SKIP+1)); return
   fi
+  if [ "$mode" = "macos" ]; then
+    if [ "$(uname)" != "Darwin" ] || ! command -v pipx >/dev/null 2>&1; then
+      echo "SKIP  $label (macos block; needs Darwin + pipx)"
+      SKIP=$((SKIP+1)); return
+    fi
+    # brew presence is the block's precondition, not something to install here.
+    body="${body//brew install pipx/command -v pipx >\/dev\/null}"
+    body="${body//pipx install sensie-eval/pipx install --force -q -e \"$REPO_ROOT\" >\/dev\/null}"
+  fi
   # Shim: package not yet on PyPI.
   body="${body//pip install sensie-eval/pip install -q -e \"$REPO_ROOT\"}"
   # Placeholder keys in docs must not clobber a real key from the environment.
@@ -55,10 +64,11 @@ for file in "${FILES[@]}"; do
     if [ "$in_block" = 0 ]; then
       case "$line" in
         *"<!-- doctest: api -->"*) mode="api" ;;
+        *"<!-- doctest: macos -->"*) mode="macos" ;;
         '```bash'*) in_block=1; body=""; start=$lineno ;;
         '```'*) mode="plain" ;;  # a non-bash fence consumes any pending marker
         "") : ;;                  # blank lines keep a pending marker alive
-        *) [ "$mode" = "api" ] && case "$line" in \#*|\<*) : ;; *) mode="plain";; esac ;;
+        *) [ "$mode" != "plain" ] && case "$line" in \#*|\<*) : ;; *) mode="plain";; esac ;;
       esac
     else
       if [ "$line" = '```' ]; then
