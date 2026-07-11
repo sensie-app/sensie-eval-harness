@@ -173,8 +173,9 @@ def run_api(args, subjects):
         if exc.retry_after:
             print(f"  Retry after: {exc.retry_after} seconds",
                   file=sys.stderr)
-        print("  Each posted read counts against the trial quota. "
-              "See docs/quota-limits.md.", file=sys.stderr)
+        print("  Each posted read counts against the trial quota. See "
+              "https://github.com/sensie-app/sensie-eval-harness/blob/main/docs/quota-limits.md",
+              file=sys.stderr)
         return EXIT_QUOTA
 
     except SensieAuthError:
@@ -182,7 +183,8 @@ def run_api(args, subjects):
         print("  Check SENSIE_API_KEY — it should look like "
               "sk_sensie_<64 hex characters>.", file=sys.stderr)
         print("  Keys are shown once at issuance. If yours is lost, see "
-              "docs/troubleshooting.md.", file=sys.stderr)
+              "https://github.com/sensie-app/sensie-eval-harness/blob/main/docs/troubleshooting.md",
+              file=sys.stderr)
         return EXIT_AUTH
 
     except SensieApiError as exc:
