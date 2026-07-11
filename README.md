@@ -111,6 +111,8 @@ The `window_reset_at` timestamp is when the oldest counted read ages out of the 
 
 **Privacy note:** live mode sends only three scalar summary values per read (`whips`, `flowing`, `agreement`). Raw accelerometer/gyroscope arrays never leave your machine — the trial tier rejects raw motion at the API boundary.
 
+**What the trial is — and is not.** The trial is a **metered integration demo**: you experience the real API surface (sessions, metered reads, quota transparency, the committed 429 schema) with reads derived from synthetic data. **There is no proposition field in the trial API, and you cannot submit your own proposition to be checked by real humans here.** In a real deployment your application shows the proposition in its own flow and binds read → proposition on your side via your `userId`/session mapping; Sensie meters and classifies. Real calibrated annotators, real cohorts, and your propositions are [the pilot](#the-pilot).
+
 ### What this repo does NOT contain
 
 This is an evaluation scaffold, not a model release. It contains **no model weights, no training data, no feature definitions, and no CFD feature families.** All classification logic is server-side at Sensie; this harness lets you validate the *methodology* — subject-disjoint evaluation, signal reliability scoring, and routing validity — against synthetic data you control.

@@ -299,6 +299,11 @@ def print_report(results: Dict) -> None:
     print(f"\nPre-registered thresholds (synthetic baseline):")
     print(f"  Accuracy ≥ 70%:     {'PASS' if noise_reduction_passes else 'FAIL'}")
     print(f"  Routing gap valid:  {'PASS' if routing_passes else 'FAIL'}")
+    if not (noise_reduction_passes and routing_passes):
+        print("\n  A FAIL here is the methodology demo working as intended:")
+        print("  these are pre-registered thresholds applied honestly to")
+        print("  synthetic data — at default noise they are expected to bite.")
+        print("  Try --noise 0.5, and see the quickstart for why.")
     print("=" * 60)
 
 
