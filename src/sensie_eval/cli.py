@@ -114,8 +114,13 @@ def run_offline(args):
     return subjects
 
 
-def run_api(args, subjects):
-    """Live mode: create session, post reads, list them back."""
+def api_preflight(args):
+    """Verify the API key up front with one unmetered call (session create),
+    so a bad key fails in one round-trip instead of after the offline eval.
+    The session is reused by run_api — no extra session, no metered calls.
+
+    Returns (client, session_id, user_id), or an int exit code on failure.
+    """
     api_key = os.environ.get("SENSIE_API_KEY")
     if not api_key:
         print("Error: SENSIE_API_KEY is not set.", file=sys.stderr)
@@ -128,6 +133,52 @@ def run_api(args, subjects):
     user_id = args.user_id or default_user_id()
     client = SensieApiClient(api_key=api_key, base_url=base_url)
 
+    try:
+        session = client.create_session(user_id, sdk_version=__version__)
+    except SensieQuotaError as exc:
+        return _quota_error_exit(exc)
+    except SensieAuthError:
+        return _auth_error_exit()
+    except SensieApiError as exc:
+        print(f"\nAPI error (HTTP {exc.status}): {exc.body}", file=sys.stderr)
+        return 1
+
+    session_id = session["id"]
+    print(f"\nSession created: id={session_id} (user_id={user_id}) "
+          f"— API key verified")
+    return client, session_id, user_id
+
+
+def _quota_error_exit(exc):
+    print("\nTrial quota exhausted (HTTP 429).", file=sys.stderr)
+    used = exc.used if exc.used is not None else "?"
+    limit = exc.limit if exc.limit is not None else "?"
+    print(f"  Used {used} of {limit} reads in the current rolling "
+          f"7-day window.", file=sys.stderr)
+    if exc.window_reset_at:
+        print(f"  Window resets at: {exc.window_reset_at}",
+              file=sys.stderr)
+    if exc.retry_after:
+        print(f"  Retry after: {exc.retry_after} seconds",
+              file=sys.stderr)
+    print("  Each posted read counts against the trial quota. See "
+          "https://github.com/sensie-app/sensie-eval-harness/blob/main/docs/quota-limits.md",
+          file=sys.stderr)
+    return EXIT_QUOTA
+
+
+def _auth_error_exit():
+    print("\nAuthentication failed (HTTP 401).", file=sys.stderr)
+    print("  Check SENSIE_API_KEY — it should look like "
+          "sk_sensie_<64 hex characters>.", file=sys.stderr)
+    print("  Keys are shown once at issuance. If yours is lost, see "
+          "https://github.com/sensie-app/sensie-eval-harness/blob/main/docs/troubleshooting.md",
+          file=sys.stderr)
+    return EXIT_AUTH
+
+
+def run_api(args, subjects, client, session_id, user_id):
+    """Live mode: post reads to the preflight session, list them back."""
     # Post reads for held-out (test) subjects — mirrors the offline protocol.
     _, test_subjects = subject_disjoint_split(
         subjects, train_frac=args.train_frac, seed=args.seed
@@ -135,10 +186,6 @@ def run_api(args, subjects):
     reads = derive_reads(test_subjects or subjects, args.reads, args.threshold)
 
     try:
-        session = client.create_session(user_id, sdk_version=__version__)
-        session_id = session["id"]
-        print(f"\nSession created: id={session_id} (user_id={user_id})")
-
         posted = 0
         for read in reads:
             client.post_sensie(
@@ -162,30 +209,10 @@ def run_api(args, subjects):
         return 0
 
     except SensieQuotaError as exc:
-        print("\nTrial quota exhausted (HTTP 429).", file=sys.stderr)
-        used = exc.used if exc.used is not None else "?"
-        limit = exc.limit if exc.limit is not None else "?"
-        print(f"  Used {used} of {limit} reads in the current rolling "
-              f"7-day window.", file=sys.stderr)
-        if exc.window_reset_at:
-            print(f"  Window resets at: {exc.window_reset_at}",
-                  file=sys.stderr)
-        if exc.retry_after:
-            print(f"  Retry after: {exc.retry_after} seconds",
-                  file=sys.stderr)
-        print("  Each posted read counts against the trial quota. See "
-              "https://github.com/sensie-app/sensie-eval-harness/blob/main/docs/quota-limits.md",
-              file=sys.stderr)
-        return EXIT_QUOTA
+        return _quota_error_exit(exc)
 
     except SensieAuthError:
-        print("\nAuthentication failed (HTTP 401).", file=sys.stderr)
-        print("  Check SENSIE_API_KEY — it should look like "
-              "sk_sensie_<64 hex characters>.", file=sys.stderr)
-        print("  Keys are shown once at issuance. If yours is lost, see "
-              "https://github.com/sensie-app/sensie-eval-harness/blob/main/docs/troubleshooting.md",
-              file=sys.stderr)
-        return EXIT_AUTH
+        return _auth_error_exit()
 
     except SensieApiError as exc:
         print(f"\nAPI error (HTTP {exc.status}): {exc.body}", file=sys.stderr)
@@ -240,9 +267,14 @@ def main(argv=None) -> int:
         return 0
 
     if args.command == "run":
+        api_ctx = None
+        if args.api:
+            api_ctx = api_preflight(args)
+            if isinstance(api_ctx, int):
+                return api_ctx
         subjects = run_offline(args)
         if args.api:
-            return run_api(args, subjects)
+            return run_api(args, subjects, *api_ctx)
         return 0
 
     parser.print_help()

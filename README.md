@@ -77,7 +77,7 @@ export SENSIE_API_KEY=sk_sensie_your_key_here
 sensie-eval run --api
 ```
 
-This runs the offline evaluation first, then creates a session and posts 5 summary reads (change with `--reads N`). Expected output ends with:
+This verifies your API key first (creating the session up front, so a bad key fails in seconds), then runs the offline evaluation and posts 5 summary reads to that session (change with `--reads N`). Expected output ends with:
 
 ```text
 Live API summary
