@@ -15,15 +15,15 @@ import os
 import unittest
 import numpy as np
 
-# Add src to path for imports
+# Add src to path so tests run without an installed package
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from generate_synthetic_imu import (
+from sensie_eval.generate_synthetic_imu import (
     generate_gesture_template,
     add_subject_noise,
     generate_subject_dataset,
 )
-from evaluate import (
+from sensie_eval.evaluate import (
     compute_signal_reliability,
     subject_disjoint_split,
     classify_subject,
