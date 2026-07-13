@@ -88,7 +88,7 @@ export SENSIE_API_KEY=sk_sensie_your_key_here
 sensie-eval run --api
 ```
 
-This verifies your API key first (creating the session up front, so a bad key fails in seconds), then runs the offline evaluation and posts 5 summary reads to that session (change with `--reads N`). Expected output ends with:
+This verifies your API key first (creating the session up front, so a bad key fails in seconds), then runs the offline evaluation and posts 5 summary reads to that session (change with `--reads N`). Expected output ends with a synthetic preview of the routing report a partner deployment would render:
 
 ```text
 Live API summary
@@ -97,6 +97,12 @@ Live API summary
   Reads posted:    5
   Reads returned:  5
   ...
+
+What you'd get: routing report
+----------------------------------------
+SYNTHETIC DEMO — real deployments render this from your annotator cohort
+5 annotators evaluated -> <K> read clearly, <M> still calibrating
+...
 ```
 
 3. When the quota is exhausted, the API returns a structured **HTTP 429** — this is deliberate quota transparency, not an error to debug:
