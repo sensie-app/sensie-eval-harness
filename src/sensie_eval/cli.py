@@ -89,6 +89,31 @@ def derive_reads(subjects, n_reads: int, threshold: float):
     return reads
 
 
+def print_routing_report(reads):
+    """Render a synthetic cohort-routing preview from the posted scalars."""
+    clear = sum(
+        read["whips"] >= 2
+        and read["flowing"] == 1
+        and read["agreement"] == 2
+        for read in reads
+    )
+    calibrating = len(reads) - clear
+    annotator_word = "annotator" if len(reads) == 1 else "annotators"
+    read_word = "read" if clear == 1 else "reads"
+    calibrating_word = "annotator" if calibrating == 1 else "annotators"
+
+    print("\nWhat you'd get: routing report")
+    print("-" * 40)
+    print("SYNTHETIC DEMO — real deployments render this from your "
+          "annotator cohort")
+    print(f"{len(reads)} {annotator_word} evaluated -> "
+          f"{clear} read clearly, {calibrating} still calibrating")
+    print("Demo rule: whips >= 2, flowing = 1, and agreement = 2 "
+          "routes as clear.")
+    print(f"Route accordingly: use {clear} clear {read_word}; keep "
+          f"{calibrating} {calibrating_word} in calibration.")
+
+
 def run_offline(args):
     """Offline synthetic evaluation — unchanged from the original harness."""
     if args.data:
@@ -203,9 +228,10 @@ def run_api(args, subjects, client, session_id, user_id):
         print(f"  Session id:      {session_id}")
         print(f"  Reads posted:    {posted}")
         print(f"  Reads returned:  {len(sensies)}")
-        print(f"  Quota remaining: not reported on success "
-              f"(the API reports used/limit on HTTP 429)")
+        print("  Quota remaining: not reported on success "
+              "(the API reports used/limit on HTTP 429)")
         print("-" * 40)
+        print_routing_report(reads)
         return 0
 
     except SensieQuotaError as exc:
