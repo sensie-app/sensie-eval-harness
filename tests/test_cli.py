@@ -138,6 +138,35 @@ class TestApiMode(unittest.TestCase):
         self.assertIn("SENSIE_API_KEY", err)
         self.assertNotIn("Traceback", err)
 
+    def test_auth_failure_is_fail_fast(self):
+        """C-2 gate: a bad key errors BEFORE any offline eval output."""
+        client = mock.MagicMock()
+        client.create_session.side_effect = SensieAuthError(
+            401, {"status": "fail", "message": "Invalid API key."}
+        )
+        code, out, err = self._run(
+            env={"SENSIE_API_KEY": "sk_sensie_bad"}, client=client
+        )
+        self.assertEqual(code, EXIT_AUTH)
+        # No offline evaluation ran or printed before the auth error.
+        self.assertNotIn("SUBJECT-DISJOINT EVALUATION REPORT", out)
+        self.assertNotIn("Generated", out)
+        # The eval never generated data either — only the probe call happened.
+        client.post_sensie.assert_not_called()
+
+    def test_good_key_metering_unchanged(self):
+        """C-2 gate: verify-first adds no metered calls and no extra session."""
+        client = mock.MagicMock()
+        client.create_session.return_value = {"id": 42}
+        client.post_sensie.return_value = {"id": 1}
+        client.list_sensies.return_value = [{"id": 1}, {"id": 2}]
+        code, out, _ = self._run(
+            env={"SENSIE_API_KEY": "sk_sensie_" + "a" * 64}, client=client
+        )
+        self.assertEqual(code, 0)
+        client.create_session.assert_called_once()
+        self.assertEqual(client.post_sensie.call_count, 2)
+
 
 class TestDerivedReads(unittest.TestCase):
 
