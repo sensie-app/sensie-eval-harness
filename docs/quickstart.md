@@ -58,7 +58,8 @@ The CLI:
 - runs the offline evaluation,
 - posts 5 summary reads derived from the held-out subjects (`POST /sdk-api/session/{id}/sensie`) — each one counts against your quota,
 - lists them back (`GET /sdk-api/session/{id}/sensie`),
-- prints a summary table.
+- prints the API summary followed by a clearly labeled synthetic routing report
+  derived locally from the reads just posted.
 
 Post more or fewer reads with `--reads N`:
 

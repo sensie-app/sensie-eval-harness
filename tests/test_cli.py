@@ -108,6 +108,42 @@ class TestApiMode(unittest.TestCase):
         _, kwargs = client.create_session.call_args
         self.assertEqual(kwargs.get("sdk_version"), __version__)
 
+    def test_successful_run_ends_with_routing_report_from_posted_reads(self):
+        client = mock.MagicMock()
+        client.create_session.return_value = {"id": 42}
+        client.post_sensie.return_value = {"id": 1}
+        client.list_sensies.return_value = [{"id": 1}, {"id": 2}]
+        reads = [
+            {"whips": 3, "flowing": 1, "agreement": 2},
+            {"whips": 1, "flowing": -1, "agreement": 1},
+        ]
+
+        with mock.patch("sensie_eval.cli.derive_reads", return_value=reads):
+            code, out, _ = self._run(
+                env={"SENSIE_API_KEY": "sk_sensie_" + "a" * 64},
+                client=client,
+            )
+
+        self.assertEqual(code, 0)
+        client.post_sensie.assert_has_calls([
+            mock.call(42, whips=3, flowing=1, agreement=2),
+            mock.call(42, whips=1, flowing=-1, agreement=1),
+        ])
+        self.assertIn(
+            "SYNTHETIC DEMO — real deployments render this from your "
+            "annotator cohort",
+            out,
+        )
+        self.assertIn(
+            "2 annotators evaluated -> 1 read clearly, 1 still calibrating",
+            out,
+        )
+        self.assertGreater(out.index("SYNTHETIC DEMO"),
+                           out.index("Quota remaining"))
+        self.assertTrue(out.rstrip().endswith(
+            "Route accordingly: use 1 clear read; keep 1 annotator in calibration."
+        ))
+
     def test_quota_exceeded_exits_75(self):
         client = mock.MagicMock()
         client.create_session.return_value = {"id": 42}
@@ -155,7 +191,7 @@ class TestApiMode(unittest.TestCase):
         client.post_sensie.assert_not_called()
 
     def test_good_key_metering_unchanged(self):
-        """C-2 gate: verify-first adds no metered calls and no extra session."""
+        """C-2/C-6b gate: local output adds no API calls."""
         client = mock.MagicMock()
         client.create_session.return_value = {"id": 42}
         client.post_sensie.return_value = {"id": 1}
@@ -166,6 +202,8 @@ class TestApiMode(unittest.TestCase):
         self.assertEqual(code, 0)
         client.create_session.assert_called_once()
         self.assertEqual(client.post_sensie.call_count, 2)
+        client.list_sensies.assert_called_once_with(42)
+        self.assertEqual(len(client.method_calls), 4)
 
 
 class TestDerivedReads(unittest.TestCase):
