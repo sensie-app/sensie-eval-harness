@@ -15,6 +15,8 @@ pipx install sensie-eval
 sensie-eval run
 ```
 
+After install, the next command is `sensie-eval run`.
+
 **Anywhere with a virtualenv (Linux, CI, or if you prefer pip):**
 
 ```bash
@@ -59,6 +61,14 @@ The CLI:
 - posts 5 summary reads derived from the held-out subjects (`POST /sdk-api/session/{id}/sensie`) — each one counts against your quota,
 - lists them back (`GET /sdk-api/session/{id}/sensie`),
 - prints a summary table.
+
+On success, the summary ends with two next steps:
+
+Want to feel a real read? The same classifier runs our consumer app — calibrate yourself in ~10 min and check in on a real proposition. TestFlight: TESTFLIGHT_LINK_TBD
+
+Pilot inquiries -> mike@joinsensie.com
+
+<!-- TODO(C-6a): Replace TESTFLIGHT_LINK_TBD with the public TestFlight URL when that launch lane publishes it. -->
 
 Post more or fewer reads with `--reads N`:
 

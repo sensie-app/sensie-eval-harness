@@ -33,6 +33,9 @@ from sensie_eval.cli import (
     EXIT_AUTH,
     EXIT_NO_KEY,
     EXIT_QUOTA,
+    PILOT_CTA,
+    REAL_READ_CTA,
+    TESTFLIGHT_LINK_TBD,
     default_user_id,
     derive_reads,
     main,
@@ -103,6 +106,9 @@ class TestApiMode(unittest.TestCase):
         self.assertIn("Session created: id=42", out)
         self.assertIn("Reads posted:    2", out)
         self.assertIn("Reads returned:  2", out)
+        self.assertIn(REAL_READ_CTA, out)
+        self.assertIn(PILOT_CTA, out)
+        self.assertIn(TESTFLIGHT_LINK_TBD, out)
         self.assertEqual(client.post_sensie.call_count, 2)
         # sdkVersion is the harness version
         _, kwargs = client.create_session.call_args
@@ -117,13 +123,17 @@ class TestApiMode(unittest.TestCase):
              "window_reset_at": "2026-07-09T14:00:00Z"},
             {"Retry-After": "3600"},
         )
-        code, _, err = self._run(
+        code, out, err = self._run(
             env={"SENSIE_API_KEY": "sk_sensie_" + "a" * 64}, client=client
         )
         self.assertEqual(code, EXIT_QUOTA)
         self.assertIn("100 of 100", err)
         self.assertIn("2026-07-09T14:00:00Z", err)
         self.assertIn("3600", err)
+        self.assertNotIn(REAL_READ_CTA, out)
+        self.assertNotIn(PILOT_CTA, out)
+        self.assertNotIn(REAL_READ_CTA, err)
+        self.assertNotIn(PILOT_CTA, err)
         self.assertNotIn("Traceback", err)
 
     def test_auth_failure_exits_77(self):
@@ -136,6 +146,8 @@ class TestApiMode(unittest.TestCase):
         )
         self.assertEqual(code, EXIT_AUTH)
         self.assertIn("SENSIE_API_KEY", err)
+        self.assertNotIn(REAL_READ_CTA, err)
+        self.assertNotIn(PILOT_CTA, err)
         self.assertNotIn("Traceback", err)
 
     def test_auth_failure_is_fail_fast(self):

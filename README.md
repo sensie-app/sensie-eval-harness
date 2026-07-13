@@ -37,7 +37,7 @@ Properties that matter:
 
 ## About This Repository
 
-This repository contains a **subject-disjoint evaluation harness** for benchmarking motion-biomarker classification systems against synthetic data. It is designed to let technical teams independently assess the methodology before committing to a paid pilot.
+This repository contains a **subject-disjoint evaluation harness** for benchmarking motion-biomarker classification systems against synthetic data. It is designed to let technical teams independently assess the methodology before committing to a pilot.
 
 **Note on PASS/FAIL output:** The harness prints PASS/FAIL at the end of each run. This banner demonstrates the evaluation methodology (pre-registered thresholds applied to a subject-disjoint split) — it operates on synthetic data only and does not represent performance on real human subjects. All PASS/FAIL results are artifacts of the synthetic data generator's configurable noise parameters.
 
@@ -64,6 +64,8 @@ brew install pipx
 pipx install sensie-eval
 sensie-eval run
 ```
+
+After install, the next command is `sensie-eval run`.
 
 Linux / CI / inside a virtualenv:
 
@@ -97,7 +99,12 @@ Live API summary
   Reads posted:    5
   Reads returned:  5
   ...
+----------------------------------------
+Want to feel a real read? The same classifier runs our consumer app — calibrate yourself in ~10 min and check in on a real proposition. TestFlight: TESTFLIGHT_LINK_TBD
+Pilot inquiries -> mike@joinsensie.com
 ```
+
+<!-- TODO(C-6a): Replace TESTFLIGHT_LINK_TBD with the public TestFlight URL when that launch lane publishes it. -->
 
 3. When the quota is exhausted, the API returns a structured **HTTP 429** — this is deliberate quota transparency, not an error to debug:
 
@@ -119,13 +126,12 @@ This is an evaluation scaffold, not a model release. It contains **no model weig
 
 ## The Pilot
 
-The next step after evaluating this harness is a fixed-scope, pre-registered pilot:
+The next step after evaluating this harness is a fixed-scope, pre-registered pilot. Pilot inquiries -> mike@joinsensie.com.
 
 - **Structure:** 4–6 weeks. Run on Sensie's managed, pre-screened panel — zero integration work or annotator disruption on your side.
 - **Primary endpoint:** Filtering to verified reads from high-signal users reduces label disagreement/error rate versus the unfiltered panel by ≥30% relative on gold-anchored tasks.
 - **Secondary endpoint:** The pre-screen's high-signal cohort outperforms the low-signal cohort by a pre-agreed margin, demonstrating the score predicts label quality.
-- **Price:** $25,000, paid, fixed.
-- **On success:** Pilot converts to a customer-funded Phase 2 — SDK integration into your annotator workforce, scoped as a paid SOW plus production pricing on a two-part tariff.
+- **On success:** Pilot converts to a Phase 2 — SDK integration into your annotator workforce, scoped in a follow-on SOW.
 
 Pass = primary endpoint met + operational gate met. All thresholds are negotiated and locked before data collection; no post-hoc goalpost movement.
 
