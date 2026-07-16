@@ -11,10 +11,23 @@ Sensie verifies the human behind AI training and eval data — a 3-second phone 
 
 Requires Python ≥ 3.10. numpy + scipy only.
 
+macOS (recommended — Homebrew Python blocks bare `pip install`):
+
+<!-- doctest: macos -->
+```bash
+brew install pipx
+pipx install sensie-eval
+sensie-eval run
+```
+
+Linux / CI / inside a virtualenv:
+
 ```bash
 pip install sensie-eval
 sensie-eval run
 ```
+
+After install, the next command is `sensie-eval run`.
 
 That generates 50 synthetic subjects at 100 Hz (3-axis accel + gyro), splits them 70/30 subject-disjoint, scores per-subject signal reliability on the held-out cohort, and prints an evaluation report ending in a PASS/FAIL banner against pre-registered thresholds.
 
@@ -26,7 +39,7 @@ sensie-eval run --noise 0.5                    # more noise → easier routing d
 sensie-eval run --train-frac 0.8               # different calibration split
 ```
 
-macOS with Homebrew Python blocks bare `pip install`; use `pipx install sensie-eval` instead. Full CLI reference and live-API mode: [docs/quickstart.md](docs/quickstart.md).
+macOS with Homebrew Python blocks bare `pip install`; use `pipx install sensie-eval` instead. Full CLI reference and live-API mode: [docs/quickstart.md](docs/quickstart.md). Hit `zsh: command not found: pip`? See [docs/troubleshooting.md](docs/troubleshooting.md#install) for the pipx remedy.
 
 ### Running tests
 
@@ -58,6 +71,16 @@ The PASS/FAIL banner is a **methodology demo**, not a performance claim: it appl
 ## Commercial pilots
 
 Once the methodology checks out, the next step is a fixed-scope, pre-registered pilot on Sensie's managed pre-screened panel: 4–6 weeks, $25,000 fixed, with a primary endpoint that filtering to verified reads reduces label disagreement/error by ≥30% relative on gold-anchored tasks (secondary endpoint: pre-agreed high-vs-low cohort gap). Thresholds are negotiated and locked before data collection. Contact **mike@joinsensie.com**.
+
+## Next steps after a successful run
+
+On a successful `sensie-eval run --api`, two optional next steps print after the routing report — no obligation, both are gated on a clean run:
+
+Want to feel a real read? The same classifier runs our consumer app — calibrate yourself in ~10 min and check in on a real proposition. TestFlight: TESTFLIGHT_LINK_TBD
+
+Pilot inquiries -> mike@joinsensie.com
+
+<!-- TODO(C-6a): Replace TESTFLIGHT_LINK_TBD with the public TestFlight URL when that launch lane publishes it. -->
 
 ## License & citation
 
