@@ -50,6 +50,16 @@ EXIT_QUOTA = 75
 EXIT_AUTH = 77
 EXIT_NO_KEY = 78
 
+# TODO(C-6a): Replace with the public TestFlight URL when that launch lane
+# publishes it. Do not invent or hard-code a placeholder URL.
+TESTFLIGHT_LINK_TBD = "TESTFLIGHT_LINK_TBD"
+REAL_READ_CTA = (
+    "Want to feel a real read? The same classifier runs our consumer app — "
+    "calibrate yourself in ~10 min and check in on a real proposition. "
+    f"TestFlight: {TESTFLIGHT_LINK_TBD}"
+)
+PILOT_CTA = "Pilot inquiries -> mike@joinsensie.com"
+
 
 def default_user_id() -> str:
     """Stable, non-identifying user id for this machine/user pair."""
@@ -232,6 +242,8 @@ def run_api(args, subjects, client, session_id, user_id):
               "(the API reports used/limit on HTTP 429)")
         print("-" * 40)
         print_routing_report(reads)
+        print(REAL_READ_CTA)
+        print(PILOT_CTA)
         return 0
 
     except SensieQuotaError as exc:

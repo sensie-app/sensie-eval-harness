@@ -2,6 +2,18 @@
 
 Every error you can hit, in the order you're likely to hit it.
 
+## Install
+
+**"zsh: command not found: pip"**
+On macOS, Homebrew Python blocks bare system installs and some shells do not expose `pip`. Use pipx instead, then run the first command:
+
+<!-- doctest: macos -->
+```bash
+brew install pipx
+pipx install sensie-eval
+sensie-eval run
+```
+
 ## Signup (somabets.com/trial)
 
 **"Disposable email domains can't start a trial." (HTTP 403, `disposable_email`)**
