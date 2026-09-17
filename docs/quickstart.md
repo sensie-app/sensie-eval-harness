@@ -65,11 +65,9 @@ The CLI:
 
 On success, the summary ends with two next steps:
 
-Want to feel a real read? The same classifier runs our consumer app — calibrate yourself in ~10 min and check in on a real proposition. TestFlight: TESTFLIGHT_LINK_TBD
+Want to feel a real read? The same classifier runs our consumer app — calibrate yourself in ~10 min and check in on a real proposition. Get the app: https://go.somacheck.com/install (redirects to TestFlight today, the App Store once that listing is live — same link either way)
 
 Pilot inquiries -> mike@joinsensie.com
-
-<!-- TODO(C-6a): Replace TESTFLIGHT_LINK_TBD with the public TestFlight URL when that launch lane publishes it. -->
 
 Post more or fewer reads with `--reads N`:
 

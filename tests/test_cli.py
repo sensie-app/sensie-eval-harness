@@ -33,9 +33,9 @@ from sensie_eval.cli import (
     EXIT_AUTH,
     EXIT_NO_KEY,
     EXIT_QUOTA,
+    INSTALL_URL,
     PILOT_CTA,
     REAL_READ_CTA,
-    TESTFLIGHT_LINK_TBD,
     default_user_id,
     derive_reads,
     main,
@@ -109,7 +109,7 @@ class TestApiMode(unittest.TestCase):
         # C-6a/C-6c: success-only CTAs
         self.assertIn(REAL_READ_CTA, out)
         self.assertIn(PILOT_CTA, out)
-        self.assertIn(TESTFLIGHT_LINK_TBD, out)
+        self.assertIn(INSTALL_URL, out)
         # CTAs must come AFTER the routing report, not before
         self.assertGreater(out.index(REAL_READ_CTA), out.index("SYNTHETIC DEMO"))
         # And the PILOT line should be the final line in the output
