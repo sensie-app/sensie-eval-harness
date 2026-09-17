@@ -42,7 +42,7 @@ pip install pytest && pytest -q
 | `src/sensie_eval/evaluate.py` | Subject-disjoint train/test split, cross-repetition reliability scoring, classification metrics (accuracy / precision / recall / F1), and Mann-Whitney U on the high-vs-low-signal cohort gap ("routing validity"). |
 | `src/sensie_eval/cli.py` | The `sensie-eval` command. `run` executes the offline pipeline; `run --api` posts scalar summary reads to the live trial API (raw motion never leaves the machine). |
 | `src/sensie_eval/api_client.py` | Thin client for the Sensie trial API — session create, post read, list reads, structured 401/429. |
-| `tests/` | 38 unit + integration tests: generation, reliability scoring, split integrity, save/load roundtrip, end-to-end pipeline, and CLI behavior. |
+| `tests/` | 39 unit + integration tests: generation, reliability scoring, split integrity, save/load roundtrip, end-to-end pipeline, and CLI behavior. |
 | `docs/` | [quickstart](docs/quickstart.md), [api-reference](docs/api-reference.md), [quota-limits](docs/quota-limits.md), [troubleshooting](docs/troubleshooting.md). |
 
 The PASS/FAIL banner is a **methodology demo**, not a performance claim: it applies pre-registered thresholds to synthetic data with configurable noise, and reports honestly — at default noise the accuracy threshold typically **fails**, which is the harness working as intended. Details in `docs/quickstart.md`.
@@ -61,7 +61,7 @@ Once the methodology checks out, the next step is a fixed-scope, pre-registered 
 
 ## License & citation
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE). Release notes: [CHANGELOG.md](CHANGELOG.md).
 
 ```bibtex
 @software{sensie_eval,
