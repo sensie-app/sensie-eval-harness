@@ -31,7 +31,7 @@ Create an evaluation session. Not metered.
 Request:
 
 ```json
-{"userId": "eval-3fa1b2c4d5e6", "type": "evaluation", "sdkVersion": "0.1.0"}
+{"userId": "eval-3fa1b2c4d5e6", "type": "evaluation", "sdkVersion": "0.1.2"}
 ```
 
 `userId` (required) is any stable string identifying the end user in *your* system — the CLI auto-generates a non-identifying hash. `type` is `"evaluation"` (default) or `"calibration"`. Device/app fields (`deviceId`, `deviceOs`, `deviceModel`, `deviceVersion`, `appVersion`, `sdkVersion`) are optional.

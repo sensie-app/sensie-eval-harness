@@ -52,4 +52,4 @@ fi
 
 ## When 100 reads isn't enough
 
-That's the point of the trial: enough to validate the integration path end to end, not enough to run a study. The next step is the pre-registered pilot — see [the README](../README.md#the-pilot) or write to mike@joinsensie.com.
+That's the point of the trial: enough to validate the integration path end to end, not enough to run a study. The next step is the pre-registered pilot — see [the README](../README.md#commercial-pilots) or write to mike@joinsensie.com.
