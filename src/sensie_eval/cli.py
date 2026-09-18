@@ -50,6 +50,18 @@ EXIT_QUOTA = 75
 EXIT_AUTH = 77
 EXIT_NO_KEY = 78
 
+# Stable link that outlives this package's own release: it redirects to
+# whatever's currently live (TestFlight today, the App Store once that
+# listing publishes) via a single source of truth at go.somacheck.com, so
+# this CTA never needs a new PyPI release to stay correct.
+INSTALL_URL = "https://go.somacheck.com/install"
+REAL_READ_CTA = (
+    "Want to feel a real read? The same classifier runs our consumer app — "
+    "calibrate yourself in ~10 min and check in on a real proposition. "
+    f"Get the app: {INSTALL_URL}"
+)
+PILOT_CTA = "Pilot inquiries -> mike@joinsensie.com"
+
 
 def default_user_id() -> str:
     """Stable, non-identifying user id for this machine/user pair."""
@@ -232,6 +244,8 @@ def run_api(args, subjects, client, session_id, user_id):
               "(the API reports used/limit on HTTP 429)")
         print("-" * 40)
         print_routing_report(reads)
+        print(REAL_READ_CTA)
+        print(PILOT_CTA)
         return 0
 
     except SensieQuotaError as exc:

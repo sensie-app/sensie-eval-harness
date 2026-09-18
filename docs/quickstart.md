@@ -15,6 +15,8 @@ pipx install sensie-eval
 sensie-eval run
 ```
 
+After install, the next command is `sensie-eval run`.
+
 **Anywhere with a virtualenv (Linux, CI, or if you prefer pip):**
 
 ```bash
@@ -60,6 +62,12 @@ The CLI:
 - lists them back (`GET /sdk-api/session/{id}/sensie`),
 - prints the API summary followed by a clearly labeled synthetic routing report
   derived locally from the reads just posted.
+
+On success, the summary ends with two next steps:
+
+Want to feel a real read? The same classifier runs our consumer app — calibrate yourself in ~10 min and check in on a real proposition. Get the app: https://go.somacheck.com/install (redirects to TestFlight today, the App Store once that listing is live — same link either way)
+
+Pilot inquiries -> mike@joinsensie.com
 
 Post more or fewer reads with `--reads N`:
 
