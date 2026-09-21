@@ -35,6 +35,7 @@ import socket
 import sys
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from sensie_eval import __version__
 from sensie_eval.api_client import (
@@ -80,19 +81,35 @@ CONSENT_VERSION = "live-gesture-v1-draft"
 NEEDS_POLICY_APPROVAL = (
     "[retention/deletion terms pending Sensie policy approval]"
 )
+# PENDING POLICY SIGN-OFF: this sentence describes how the SomaCheck app itself
+# handles the gesture (including sending motion data to Sensie). Counsel/founder
+# must approve it against the SomaCheck privacy policy before release.
+APP_PRIVACY_SENTENCE = (
+    "The SomaCheck app itself handles your gesture under the SomaCheck "
+    "privacy policy, which includes sending motion data to Sensie."
+)
+DO_IT_YOURSELF = (
+    "This is a reading of your own gesture. Do the gesture yourself, on your "
+    "own phone. Do not give the code to anyone else or use it to collect "
+    "another person's reading."
+)
 CONSENT_COPY = f"""\
 Live gesture: what you are agreeing to
 {"-" * 40}
 This step uses a real gesture, done on a phone in the SomaCheck app.
 
 What is captured and shared
-  Raw motion stays on the phone and is never sent anywhere. The only things
-  shared are three values the app derives from your gesture: whips, flowing
-  and agreement. The researcher running this command receives those three
-  values and nothing else.
+  The researcher running this command never receives raw motion, the
+  statement you check, or your account details. They receive two values the
+  app derives from your gesture: whips (how many gesture movements were
+  counted) and flowing (1 if your reading was Aligned, -1 if it was
+  Unaligned). The report also has an optional agreement field; the app does
+  not fill it in, so it shows as "not provided".
+  {APP_PRIVACY_SENTENCE}
 
 Your choices
   You can stop at any time, before or during the gesture.
+  {DO_IT_YOURSELF}
   Saying yes here records your consent with Sensie first; only then is an
   activation code issued. No code exists without it.
 
@@ -166,7 +183,8 @@ def print_live_report(read):
     print(f"  flowing:   {read['flowing']}")
     agreement = read.get("agreement")
     print(f"  agreement: {'not provided' if agreement is None else agreement}")
-    print("Only these values left your phone; raw motion did not.")
+    print("The researcher-facing result is only the values above; raw motion "
+          "is never shared with the researcher.")
 
 
 def print_routing_report(reads, live=False):
@@ -226,6 +244,15 @@ def run_offline(args):
     return subjects
 
 
+def _api_base_url():
+    return os.environ.get("SENSIE_API_URL", DEFAULT_API_URL)
+
+
+def _is_production_host(base_url):
+    prod = urlparse(DEFAULT_API_URL).hostname
+    return (urlparse(base_url).hostname or "").lower() == prod
+
+
 def _client_from_env():
     """Build the API client from SENSIE_API_KEY / SENSIE_API_URL, or return
     EXIT_NO_KEY (after printing how to get a key) when the key is unset."""
@@ -236,8 +263,7 @@ def _client_from_env():
               file=sys.stderr)
         print("  export SENSIE_API_KEY=sk_sensie_...", file=sys.stderr)
         return EXIT_NO_KEY
-    base_url = os.environ.get("SENSIE_API_URL", DEFAULT_API_URL)
-    return SensieApiClient(api_key=api_key, base_url=base_url)
+    return SensieApiClient(api_key=api_key, base_url=_api_base_url())
 
 
 def api_preflight(args):
@@ -413,8 +439,8 @@ def _live_error_exit(exc):
 
 def _expired_exit():
     print("\nThis activation code has expired.", file=sys.stderr)
-    print("  No result was produced, and nothing is stored beyond the "
-          "expired code.", file=sys.stderr)
+    print("  No result was produced. Sensie keeps the consent record and the "
+          "expired code; no gesture values were stored.", file=sys.stderr)
     print("  To try again, run `sensie-eval run --live` for a new code.",
           file=sys.stderr)
     return EXIT_EXPIRED
@@ -499,6 +525,12 @@ def run_live(args):
     client = _client_from_env()
     if isinstance(client, int):
         return client
+    if CONSENT_VERSION.endswith("-draft") and _is_production_host(
+            _api_base_url()):
+        print(f"Error: the consent text ({CONSENT_VERSION}) is still a "
+              "draft and cannot be recorded against production. Nothing "
+              "was sent.", file=sys.stderr)
+        return 2
 
     # Consent is collected here, before any code exists.
     print(CONSENT_COPY)
@@ -543,10 +575,12 @@ the time: about 15-20 minutes including calibration. The code is valid for
   1. Install SomaCheck:  {INSTALL_URL}
   2. Enter this code:    {code}
      or open this link:  somacheck://activate/{code}
+     Do the gesture yourself, on your own phone. Do not give the code to
+     anyone else or use it to collect another person's reading.
   3. Do the gesture in the app. The result shows up here.
 
-You are about to hand over a real gesture. Only the three derived values
-(whips, flowing, agreement) come back; raw motion stays on the phone.
+You are about to hand over a real gesture. The researcher receives only the
+derived values (whips and flowing), never raw motion.
 Press Ctrl-C to stop waiting at any time; the code keeps working until it
 expires.
 """, flush=True)
@@ -618,7 +652,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "and wait for a real gesture done in the SomaCheck "
                           "app (requires SENSIE_API_KEY)")
     run.add_argument("--yes", action="store_true",
-                     help="With --live: confirm consent non-interactively "
+                     help="With --live: confirm consent non-interactively, "
+                          "only when you are the person doing the gesture "
                           "(the consent text is still printed)")
     run.add_argument("--poll-interval", type=float,
                      default=DEFAULT_POLL_INTERVAL, metavar="SECONDS",

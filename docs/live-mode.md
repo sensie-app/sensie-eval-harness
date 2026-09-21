@@ -1,5 +1,7 @@
 # Live mode (tier two)
 
+**Status: preview, not yet released.** The backend routes are not deployed to production and no public SomaCheck build includes activation-code entry yet. The app side has been exercised in the iOS Simulator only; it has not been validated on a physical device.
+
 You already ran the offline demo. This one uses a **real gesture**, done on a real phone in the SomaCheck app — so budget the time: about **15-20 minutes including calibration**. The activation code is valid for **30 minutes**.
 
 Everything here is additive. `sensie-eval run` and `sensie-eval run --api` behave exactly as before.
@@ -12,17 +14,20 @@ Everything here is additive. `sensie-eval run` and `sensie-eval run --api` behav
 
 ## What is shared
 
-Raw motion stays on the phone and is never sent anywhere. The only things that come back are the three values the app derives from the gesture:
+The researcher running this command never receives raw motion, the statement you check, or your account details. They receive two values the app derives from your gesture:
 
-| Value | Type | Range |
-|-------|------|-------|
-| `whips` | integer | 0 or more |
-| `flowing` | integer | `1` or `-1` |
-| `agreement` | integer, optional | `-1`, `1`, or `2` — or not provided |
+| Value | Type | Meaning |
+|-------|------|---------|
+| `whips` | integer, 0 or more | how many gesture movements were counted |
+| `flowing` | integer, `1` or `-1` | `1` if your reading was Aligned, `-1` if it was Unaligned |
 
-Those are the same three fields as the [`sensie` endpoint](api-reference.md#post-sdk-apisessionsessionidsensie). Nothing else is captured or shared. You can stop at any time.
+The report also has an optional `agreement` field (the [`sensie` endpoint](api-reference.md#post-sdk-apisessionsessionidsensie) accepts `-1`, `1` or `2`). The app does not fill it in, so the CLI prints `agreement: not provided` (never `0` or any default) and nothing it prints is derived from agreement.
 
-`agreement` may be **not provided**. In the app it is optional feedback collected *after* the reveal, so it does not exist yet when the gesture completes, and the app never fills it in or guesses it. When it is missing, the CLI prints `agreement: not provided` (never `0` or any default) and nothing it prints is derived from agreement.
+The SomaCheck app itself handles your gesture under the SomaCheck privacy policy, which includes sending motion data to Sensie. <!-- PENDING POLICY SIGN-OFF: counsel/founder must approve this sentence. -->
+
+This is a reading of your own gesture. Do the gesture yourself, on your own phone. Do not give the code to anyone else or use it to collect another person's reading.
+
+You can stop at any time.
 
 Consent is collected **in the terminal, before a code exists**. The CLI prints the consent text and asks for a yes; only then does it record your consent with Sensie and request a code. If you say no, nothing is sent.
 
@@ -53,11 +58,11 @@ Your live read
 Real gesture, done on your phone in the SomaCheck app — not synthetic data.
   whips:     3
   flowing:   1
-  agreement: 2
-Only these values left your phone; raw motion did not.
+  agreement: not provided
+The researcher-facing result is only the values above; raw motion is never shared with the researcher.
 ```
 
-When the app did not send an agreement value, that line reads `  agreement: not provided` and the rest is the same.
+The `agreement` line reads `not provided` because the app does not fill it in.
 
 The values are shown as the app derived them. The CLI does not score, rank, or route anyone from them.
 
@@ -69,7 +74,7 @@ sensie-eval run --help
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--yes` | off | Confirm consent without the y/N prompt. The consent text is still printed. Required when there is no interactive terminal; without it, the CLI refuses (exit 2) and makes no request. |
+| `--yes` | off | Confirm consent without the y/N prompt, only when you are the person doing the gesture. The consent text is still printed. Required when there is no interactive terminal; without it, the CLI refuses (exit 2) and makes no request. |
 | `--poll-interval SECONDS` | 10 | Seconds between status checks. |
 | `--timeout MINUTES` | 30 | Stop waiting after this long. |
 
@@ -98,7 +103,7 @@ If `--timeout` passes before the gesture is finished, the CLI prints the same re
 
 ## If the code expires
 
-A code that is not completed within 30 minutes expires. No result was produced, and nothing is stored beyond the expired code. Run `sensie-eval run --live` again for a new code; you will be asked for consent again.
+A code that is not completed within 30 minutes expires. No result was produced. Sensie keeps the consent record and the expired code; no gesture values were stored. Run `sensie-eval run --live` again for a new code; you will be asked for consent again.
 
 If the app cannot read the gesture, it asks you to try again. That is not a result and nothing is reported for it.
 

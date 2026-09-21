@@ -15,6 +15,8 @@ Tests cover:
   5. `status` subcommand
   6. 403 consent_required / 429 rate_limited / 429 quota_exceeded / 401 / 78
   7. The offline/--api routing report is unchanged by the live parameter
+  8. Draft-consent guard: a -draft consent version is refused (exit 2, no
+     request) against the production host, allowed against a local one
 """
 
 import io
@@ -27,6 +29,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sensie_eval.api_client import (
+    DEFAULT_API_URL,
     SensieActivationGoneError,
     SensieActivationNotFoundError,
     SensieAuthError,
@@ -43,11 +46,14 @@ from sensie_eval.cli import (
     EXIT_QUOTA,
     INSTALL_URL,
     NEEDS_POLICY_APPROVAL,
+    DO_IT_YOURSELF,
+    APP_PRIVACY_SENTENCE,
     main,
     print_routing_report,
 )
 
 FAKE_KEY = "sk_sensie_" + "0" * 64
+LOCAL_URL = "http://127.0.0.1:54321/functions/v1"
 CODE = "ABCD2345"
 READ = {"whips": 3, "flowing": 1, "agreement": 2}
 READ_NO_AGREEMENT = {"whips": 3, "flowing": 1, "agreement": None}
@@ -84,7 +90,8 @@ class LiveTestCase(unittest.TestCase):
     def invoke(self, argv, client, env=None, tty=False, stdin_answer=None,
                monotonic=None):
         """Run main(argv) with the client patched. Returns (code, out, err)."""
-        env = {"SENSIE_API_KEY": FAKE_KEY} if env is None else env
+        env = ({"SENSIE_API_KEY": FAKE_KEY, "SENSIE_API_URL": LOCAL_URL}
+               if env is None else env)
         out, err = io.StringIO(), io.StringIO()
         stdin = mock.MagicMock()
         stdin.isatty.return_value = tty
@@ -169,14 +176,67 @@ class TestConsent(LiveTestCase):
         self.assertIn(NEEDS_POLICY_APPROVAL, CONSENT_COPY)
         self.assertIn("pending Sensie policy approval", NEEDS_POLICY_APPROVAL)
         for word in ("whips", "flowing", "agreement", "stop at any time",
-                     "Raw motion stays on the phone"):
+                     "never receives raw motion", "not provided"):
             self.assertIn(word, CONSENT_COPY)
+        self.assertIn(APP_PRIVACY_SENTENCE, CONSENT_COPY)
+        self.assertIn("sending motion data to Sensie", CONSENT_COPY)
+
+    def test_consent_copy_makes_no_false_raw_motion_claim(self):
+        for phrase in ("never sent anywhere", "stays on the phone",
+                       "left your phone"):
+            self.assertNotIn(phrase, CONSENT_COPY)
+
+    def test_consent_copy_says_do_the_gesture_yourself(self):
+        self.assertIn(DO_IT_YOURSELF, CONSENT_COPY)
+        self.assertIn("Do the gesture yourself", CONSENT_COPY)
+        self.assertIn("Do not give the code to anyone else", CONSENT_COPY)
+
+    def test_yes_help_text_names_the_gesturer(self):
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["run", "--help"])
+        self.assertIn("only when you are the person doing the gesture",
+                      " ".join(out.getvalue().split()))
 
     def test_live_and_api_together_rejected(self):
         client = make_client([act("pending")])
         code, _, err = self.invoke(["run", "--live", "--api", "--yes"], client)
         self.assertEqual(code, 2)
         client.post_consent.assert_not_called()
+
+
+class TestDraftConsentGuard(LiveTestCase):
+
+    def test_production_host_refused_with_no_request(self):
+        for env in ({"SENSIE_API_KEY": FAKE_KEY},
+                    {"SENSIE_API_KEY": FAKE_KEY,
+                     "SENSIE_API_URL": DEFAULT_API_URL},
+                    {"SENSIE_API_KEY": FAKE_KEY,
+                     "SENSIE_API_URL": DEFAULT_API_URL.upper() + "/"}):
+            client = make_client([act("completed", READ)])
+            code, out, err = self.invoke(["run", "--live", "--yes"], client,
+                                         env=env)
+            self.assertEqual(code, 2)
+            self.assertIn("draft", err)
+            self.assertIn("cannot be recorded against production", err)
+            self.assertNotIn("Live gesture: what you are agreeing to", out)
+            self.assertEqual(client.method_calls, [])
+
+    def test_local_host_allowed(self):
+        client = make_client([act("completed", READ)])
+        code, _, _ = self.invoke(["run", "--live", "--yes"], client,
+                                 env={"SENSIE_API_KEY": FAKE_KEY,
+                                      "SENSIE_API_URL": "http://127.0.0.1:8787"})
+        self.assertEqual(code, 0)
+        client.post_consent.assert_called_once_with(CONSENT_VERSION)
+
+    def test_non_draft_version_allowed_on_production(self):
+        client = make_client([act("completed", READ)])
+        with mock.patch("sensie_eval.cli.CONSENT_VERSION", "live-gesture-v1"):
+            code, _, _ = self.invoke(["run", "--live", "--yes"], client,
+                                     env={"SENSIE_API_KEY": FAKE_KEY})
+        self.assertEqual(code, 0)
+        client.post_consent.assert_called_once_with("live-gesture-v1")
 
 
 class TestUpfrontAndPolling(LiveTestCase):
@@ -189,6 +249,11 @@ class TestUpfrontAndPolling(LiveTestCase):
         self.assertIn(f"somacheck://activate/{CODE}", out)
         self.assertIn("15-20 minutes including calibration", out)
         self.assertIn("valid for\n30 minutes", out)
+        step2 = " ".join(
+            out.split("2. Enter this code:")[1].split("3. Do the")[0].split())
+        self.assertIn("Do the gesture yourself, on your own phone", step2)
+        self.assertIn("Do not give the code to anyone else", step2)
+        self.assertNotIn("stays on the phone", out.split("Live gesture: tier two")[1])
         self.assertIn("already ran the offline demo", out)
         self.assertIn("real gesture", out)
         # The offline evaluation must not run on the live path.
@@ -214,7 +279,8 @@ class TestUpfrontAndPolling(LiveTestCase):
         client = make_client([act("pending"), act("completed", READ)])
         with mock.patch("sensie_eval.cli.time.sleep") as sleep:
             out, err = io.StringIO(), io.StringIO()
-            with mock.patch.dict(os.environ, {"SENSIE_API_KEY": FAKE_KEY}), \
+            with mock.patch.dict(os.environ, {"SENSIE_API_KEY": FAKE_KEY,
+                                              "SENSIE_API_URL": LOCAL_URL}), \
                     mock.patch("sensie_eval.cli.SensieApiClient",
                                return_value=client), \
                     redirect_stdout(out), redirect_stderr(err):
@@ -231,7 +297,9 @@ class TestUpfrontAndPolling(LiveTestCase):
         self.assertIn("whips:     3", out)
         self.assertIn("flowing:   1", out)
         self.assertIn("agreement: 2", out)
-        self.assertNotIn("not provided", out)
+        self.assertNotIn("not provided", out.split("Your live read")[1])
+        self.assertIn("raw motion is never shared with the researcher", out)
+        self.assertNotIn("left your phone", out)
         self.assertNotIn("SYNTHETIC", out)
         self.assertNotIn("annotator", out.split("Your live read")[1])
         self.assertNotIn("Route accordingly", out)
@@ -254,7 +322,9 @@ class TestUpfrontAndPolling(LiveTestCase):
         self.assertEqual(EXIT_EXPIRED, 76)
         self.assertIn("expired", err)
         self.assertIn("No result was produced", err)
-        self.assertIn("nothing is stored beyond the expired code", err)
+        self.assertIn("Sensie keeps the consent record and the expired code; "
+                      "no gesture values were stored", err)
+        self.assertNotIn("nothing is stored", err)
         self.assertNotIn("Your live read", out)
 
     def test_ctrl_c_prints_resume_hint_and_exits_130(self):

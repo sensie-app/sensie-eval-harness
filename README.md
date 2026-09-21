@@ -39,7 +39,7 @@ sensie-eval run --noise 0.5                    # more noise → easier routing d
 sensie-eval run --train-frac 0.8               # different calibration split
 ```
 
-macOS with Homebrew Python blocks bare `pip install`; use `pipx install sensie-eval` instead. Full CLI reference and live-API mode: [docs/quickstart.md](docs/quickstart.md). Ready for a real gesture instead of synthetic data? `sensie-eval run --live` is the tier-two path — about 15-20 minutes, on your phone: [docs/live-mode.md](docs/live-mode.md). Hit `zsh: command not found: pip`? See [docs/troubleshooting.md](docs/troubleshooting.md#install) for the pipx remedy.
+macOS with Homebrew Python blocks bare `pip install`; use `pipx install sensie-eval` instead. Full CLI reference and live-API mode: [docs/quickstart.md](docs/quickstart.md). Preview: `sensie-eval run --live` is a tier-two path that uses a real gesture instead of synthetic data — about 15-20 minutes, on your phone: [docs/live-mode.md](docs/live-mode.md). Hit `zsh: command not found: pip`? See [docs/troubleshooting.md](docs/troubleshooting.md#install) for the pipx remedy.
 
 ### Running tests
 
