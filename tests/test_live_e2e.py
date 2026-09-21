@@ -979,6 +979,198 @@ class TestRevertToProveAtomicComplete(_CliHarness):
 
 
 # ---------------------------------------------------------------------------
+# Case 6 — F2a: draft consent is refused against the production default host
+# ---------------------------------------------------------------------------
+
+
+# Module-scoped recording state for the draft-guard test below. The
+# stub client (defined here so it can be referenced from setUp) holds
+# no reference to the test instance — tests run isolated, but class
+# bodies and the surrounding module both live for the duration of the
+# test process.
+_calls = []
+
+
+class _ForbiddenCall(AssertionError):
+    """Raised by the recording stub if any API method is invoked when
+    the draft guard should have fired."""
+
+
+class _RecordingClient:
+    """Stand-in for SensieApiClient used by the draft-guard test.
+
+    Any method call is recorded and then raises _ForbiddenCall. The
+    guard in cli.run_live must short-circuit BEFORE this stub is ever
+    asked to do anything, so the recorded list ends up containing at
+    most a single ``__init__`` entry (which the test treats as
+    acceptable — the client object IS constructed before the guard
+    check).
+    """
+
+    def post_consent(self, *a, **kw):
+        _calls.append(("post_consent", a, kw))
+        raise _ForbiddenCall(
+            "post_consent must NOT be called when the draft "
+            "guard fires against production"
+        )
+
+    def request_activation_code(self, *a, **kw):
+        _calls.append(("request_activation_code", a, kw))
+        raise _ForbiddenCall(
+            "request_activation_code must NOT be called when "
+            "the draft guard fires against production"
+        )
+
+    def get_activation(self, *a, **kw):
+        _calls.append(("get_activation", a, kw))
+        raise _ForbiddenCall(
+            "get_activation must NOT be called when the draft "
+            "guard fires against production"
+        )
+
+
+class TestLiveDraftGuardAgainstProduction(unittest.TestCase):
+    """Lane 3 introduced a guard (F2a): when the bundled CONSENT_VERSION
+    ends in ``-draft`` and the resolved API host equals the production
+    default (``sensie_eval.api_client.DEFAULT_API_URL``), ``run --live``
+    must exit 2 AND must never send a consent request.
+
+    Two safety properties this test must prove:
+      * the CLI exits 2 with the documented error copy on stderr;
+      * no method on the API client is called (so no HTTP request to
+        production is ever issued).
+
+    The second property is the important one: the lane brief explicitly
+    forbids contacting the real production host. We prove it by
+    monkeypatching ``sensie_eval.cli._client_from_env`` to return a
+    *recording* stub whose every method raises AssertionError if called.
+    If the draft guard fires (which it must), the stub is constructed
+    but no method is invoked, so the assertion list stays empty. If a
+    future refactor regresses the guard, one of those calls would fire
+    and this test would go red.
+    """
+
+    def setUp(self):
+        # Capture original env so we never leak SENSIE_API_URL to other
+        # tests, and so the in-process mock from sibling tests isn't
+        # accidentally picked up here. This test does NOT use the
+        # in-process mock — the whole point is to prove NO request goes
+        # out (and certainly not to production).
+        self._saved_env = {}
+        for var in ("SENSIE_API_KEY", "SENSIE_API_URL"):
+            self._saved_env[var] = os.environ.get(var)
+        os.environ["SENSIE_API_KEY"] = TRIAL_KEY
+
+        # Point at the production default exactly as the CLI resolves it
+        # in production. We import DEFAULT_API_URL so this test stays
+        # in sync if the constant ever moves.
+        from sensie_eval.api_client import DEFAULT_API_URL as PROD
+        self._prod_url = PROD
+        os.environ["SENSIE_API_URL"] = PROD
+
+        # Recording stub. The list lives at module scope so the
+        # nested-client class can append to it without holding a
+        # reference to the test instance.
+        self.calls = _calls
+        _calls.clear()
+
+        # Sentinel: if the real client construction is bypassed, we want
+        # the test to fail loudly rather than fall through and silently
+        # hit production.
+        from sensie_eval import cli as _cli_mod
+        # CRITICAL: capture the real function BEFORE we overwrite the
+        # attribute, otherwise tearDown would re-install our own stub
+        # and leak it to every test that runs after us.
+        real_cli_from_env = _cli_mod._client_from_env
+
+        def _stub_client_from_env():
+            # Mirror the real one enough to satisfy the call: it returns
+            # a client object (or an int exit code when key is missing).
+            # We assume the key is set in setUp; mirror the success path.
+            _calls.append(("__init__", (os.environ.get("SENSIE_API_KEY"),)))
+            return _RecordingClient()
+
+        _cli_mod._client_from_env = _stub_client_from_env
+        self._original_client_from_env = real_cli_from_env
+
+    def tearDown(self):
+        from sensie_eval import cli as _cli_mod
+        _cli_mod._client_from_env = self._original_client_from_env
+        for var, val in self._saved_env.items():
+            if val is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = val
+
+    def test_run_live_against_prod_default_exits_2_and_makes_no_request(self):
+        out, err = io.StringIO(), io.StringIO()
+        # Sanity: we are actually pointing at the production default.
+        # If this assert ever fails, either DEFAULT_API_URL changed or
+        # the env stub above is wrong; either way this test is no
+        # longer proving what it claims to prove.
+        from sensie_eval.api_client import DEFAULT_API_URL as PROD
+        self.assertEqual(os.environ.get("SENSIE_API_URL"), PROD,
+                         "this test must point at the production default")
+        self.assertTrue(PROD.startswith("https://"),
+                        "production default must be https")
+
+        # Run the CLI. We pass --yes so a non-TTY stdin doesn't get
+        # blamed for the refusal — the refusal must come from the
+        # draft guard, not the TTY check.
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                exit_code = main(["run", "--live", "--yes",
+                                  "--poll-interval", "1", "--timeout", "1"])
+        finally:
+            # Belt-and-suspenders: even if an assertion below fires,
+            # make sure the next test in this process sees the real
+            # _client_from_env, not our stub.
+            from sensie_eval import cli as _cli_mod
+            _cli_mod._client_from_env = self._original_client_from_env
+
+        # (a) Exit code 2.
+        self.assertEqual(
+            exit_code, 2,
+            f"draft-against-production must exit 2; got {exit_code}\n"
+            f"out={out.getvalue()!r}\nerr={err.getvalue()!r}",
+        )
+
+        # (b) The documented error copy is printed on stderr. We assert
+        # on a stable substring ("draft") and the production-host cue
+        # so we don't over-couple to Lane 3's exact wording.
+        err_text = err.getvalue()
+        self.assertIn("draft", err_text.lower(),
+                      f"expected 'draft' in stderr; got: {err_text!r}")
+        self.assertIn("production", err_text.lower(),
+                      f"expected 'production' in stderr; got: {err_text!r}")
+        # The CLI says nothing was sent — that's the safety claim.
+        self.assertIn("nothing was sent", err_text.lower(),
+                      f"expected 'nothing was sent' in stderr; "
+                      f"got: {err_text!r}")
+
+        # (c) No API method was called. The stub constructor may run
+        # (the CLI builds the client before the guard check), but the
+        # only method that matters — post_consent — must not be
+        # reached. We accept either: zero calls of any kind, or only
+        # the constructor. Anything else means the guard regressed.
+        method_calls = [c for c in self.calls if c[0] != "__init__"]
+        self.assertEqual(
+            method_calls, [],
+            "draft guard must fire BEFORE any API call; "
+            f"recorded method calls: {method_calls!r}",
+        )
+
+        # (d) Consent text was NOT printed to stdout. The guard fires
+        # before the consent banner is displayed; if the banner
+        # appears, the guard has regressed and a real consent request
+        # is about to be sent.
+        self.assertNotIn("Live gesture: what you are agreeing to",
+                         out.getvalue(),
+                         "draft guard must fire before the consent banner "
+                         "is printed; got:\n" + out.getvalue())
+
+
+# ---------------------------------------------------------------------------
 # Tiny stdin-redirection context manager (stdlib only)
 # ---------------------------------------------------------------------------
 # (See the redirect_stdin helper at the top of this file; this file does
