@@ -132,6 +132,18 @@ class _Store:
 
     def __init__(self, ttl_seconds: int, clock=None):
         self._ttl = ttl_seconds
+        # Wall-clock epoch anchor captured at startup. `now()` returns
+        # real Unix epoch seconds (so `_iso()` formats real UTC, e.g.
+        # 2026-09-21T...Z, not 1970). `time.monotonic()` is still the
+        # underlying tick source so the wall clock cannot run backwards
+        # if the system clock jumps.
+        self._monotonic_origin = time.monotonic()
+        self._wall_origin = time.time()
+        # MOCK-ONLY test hook: extra seconds added on top of the wall
+        # anchor. `advance()` shifts this; everything else reads through
+        # `now()`. Active even if the caller passed a custom `clock` —
+        # we only use the injected clock as the monotonic tick source.
+        self._mock_offset = 0.0
         self._clock = clock or time.monotonic
         self._lock = threading.Lock()
         # consents: id -> dict
@@ -143,23 +155,20 @@ class _Store:
     # -- clock ------------------------------------------------------------
 
     def now(self) -> float:
-        return self._clock()
+        """Real Unix epoch seconds, with any test-hook advance applied."""
+        return (self._wall_origin
+                + (self._clock() - self._monotonic_origin)
+                + self._mock_offset)
 
     def advance(self, seconds: int) -> None:
-        """MOCK-ONLY test helper. Advances the monotonic clock by `seconds`."""
-        # Use a closure-captured offset so the same `now()` keeps advancing
-        # consistently without rewinding other callers' measurements.
-        base = self._clock()
-        base_offset = getattr(self._clock, "_mock_offset", 0.0)
-        new_offset = base_offset + seconds
-        # Replace `self._clock` with a callable that returns base + offset.
-        clock = self._clock
+        """MOCK-ONLY test helper. Advances the wall clock by `seconds`.
 
-        def _shifted() -> float:
-            return clock() + (new_offset - getattr(clock, "_mock_offset", 0.0))
-
-        _shifted._mock_offset = new_offset  # type: ignore[attr-defined]
-        self._clock = _shifted
+        Expiry comparisons and `_iso()` formatting both go through
+        `now()`, so shifting the wall clock by N seconds immediately
+        makes any code whose `expires_at < now()` appear lapsed and
+        formats a new `expires_at` accordingly on the next read.
+        """
+        self._mock_offset += seconds
 
     # -- consents ---------------------------------------------------------
 
