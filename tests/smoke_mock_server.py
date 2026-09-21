@@ -260,6 +260,178 @@ def main() -> int:
         assert sensie == {"whips": 3, "flowing": 1, "agreement": 2}, \
             f"bad sensie shape: {sensie!r}"
 
+        # --- D9: agreement is OPTIONAL on complete ----------------------
+        # The SomaCheck app never sends agreement (it's optional feedback
+        # collected AFTER the reveal and must never be invented). Both
+        # "omitted" and "JSON null" must succeed and store null. When
+        # agreement IS present and non-null it must still be in {-1,1,2};
+        # agreement=0 is rejected with 400 invalid_payload.
+        #
+        # Use a fresh key so we don't collide with the rate-limit setup
+        # later in this script (KEY already has 3 outstanding codes).
+        d9_key = "sk_sensie_" + "9" * 64
+        d9_h = {"x-api-key": d9_key}
+
+        # Issue + claim a code on the fresh key.
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/consent", d9_h,
+            {"consent_version": "v1", "scope": "live-gesture",
+             "accepted": True},
+        )
+        d9_cid = body["data"]["consent"]["id"]
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/activation-code", d9_h,
+            {"consent_id": d9_cid},
+        )
+        d9_code = body["data"]["activation"]["code"]
+        _hit("POST", f"{base}/sdk-api/activation/{d9_code}/claim",
+             ha, {"device_id": "d9-dev"})
+
+        # D9 case A: agreement OMITTED entirely -> success, stored as null.
+        status, _, body = _hit(
+            "PATCH", f"{base}/sdk-api/activation/{d9_code}/complete", ha,
+            {"whips": 2, "flowing": 1},  # no agreement key
+        )
+        expect_envelope_ok(
+            "D9: complete with agreement omitted -> 200",
+            status, body, 200, ["activation"],
+        )
+        # D4: success body still mirrors the GET shape; agreement is NOT
+        # in the success envelope (it's only in the sensie sub-object of
+        # GET). The success body must carry status + completed_at.
+        activation_d9_omit = body["data"]["activation"]
+        assert activation_d9_omit.get("status") == "completed", \
+            f"D9 omitted: bad success shape: {activation_d9_omit!r}"
+        try:
+            _dt.datetime.strptime(
+                activation_d9_omit["completed_at"], "%Y-%m-%dT%H:%M:%SZ",
+            )
+        except (KeyError, ValueError) as exc:
+            raise AssertionError(
+                "D9 omitted: complete.completed_at missing or not "
+                f"ISO-8601 UTC: {activation_d9_omit!r} ({exc})"
+            )
+        assert "agreement" not in activation_d9_omit, (
+            "D9 omitted: success body must not leak agreement: "
+            f"{activation_d9_omit!r}"
+        )
+
+        # GET after the omitted-agreement complete -> sensie.agreement is null.
+        status, _, body = _hit(
+            "GET", f"{base}/sdk-api/activation/{d9_code}", d9_h,
+        )
+        expect_envelope_ok(
+            "D9: GET after agreement-omitted complete -> 200",
+            status, body, 200, ["activation"],
+        )
+        sensie_d9_omit = body["data"]["activation"]["sensie"]
+        ok = (
+            isinstance(sensie_d9_omit, dict)
+            and sensie_d9_omit.get("whips") == 2
+            and sensie_d9_omit.get("flowing") == 1
+            and sensie_d9_omit.get("agreement", "__missing__") is None
+        )
+        _step(
+            "D9: agreement omitted -> GET sensie.agreement is null",
+            ok,
+            f"sensie={sensie_d9_omit!r}",
+        )
+
+        # D9 case B: agreement EXPLICITLY null -> also succeeds, stored null.
+        # Use a second code on the same fresh key (still under the 3-cap).
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/consent", d9_h,
+            {"consent_version": "v1", "scope": "live-gesture",
+             "accepted": True},
+        )
+        d9_cid2 = body["data"]["consent"]["id"]
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/activation-code", d9_h,
+            {"consent_id": d9_cid2},
+        )
+        d9_code2 = body["data"]["activation"]["code"]
+        _hit("POST", f"{base}/sdk-api/activation/{d9_code2}/claim",
+             ha, {"device_id": "d9-dev2"})
+        status, _, body = _hit(
+            "PATCH", f"{base}/sdk-api/activation/{d9_code2}/complete", ha,
+            {"whips": 4, "flowing": -1, "agreement": None},
+        )
+        expect_envelope_ok(
+            "D9: complete with agreement=null -> 200",
+            status, body, 200, ["activation"],
+        )
+        status, _, body = _hit(
+            "GET", f"{base}/sdk-api/activation/{d9_code2}", d9_h,
+        )
+        sensie_d9_null = body["data"]["activation"]["sensie"]
+        ok = (
+            isinstance(sensie_d9_null, dict)
+            and sensie_d9_null.get("whips") == 4
+            and sensie_d9_null.get("flowing") == -1
+            and sensie_d9_null.get("agreement", "__missing__") is None
+        )
+        _step(
+            "D9: agreement=null -> GET sensie.agreement is null",
+            ok,
+            f"sensie={sensie_d9_null!r}",
+        )
+
+        # D9 case C: agreement PRESENT and non-null in {-1,1,2} -> stored
+        # verbatim. Re-confirm the value-path still works (mirrors the
+        # earlier "agreement: 2" happy-path test, but on a fresh code to
+        # keep this section self-contained).
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/consent", d9_h,
+            {"consent_version": "v1", "scope": "live-gesture",
+             "accepted": True},
+        )
+        d9_cid3 = body["data"]["consent"]["id"]
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/activation-code", d9_h,
+            {"consent_id": d9_cid3},
+        )
+        d9_code3 = body["data"]["activation"]["code"]
+        _hit("POST", f"{base}/sdk-api/activation/{d9_code3}/claim",
+             ha, {"device_id": "d9-dev3"})
+        status, _, body = _hit(
+            "PATCH", f"{base}/sdk-api/activation/{d9_code3}/complete", ha,
+            {"whips": 1, "flowing": 1, "agreement": -1},
+        )
+        expect_envelope_ok(
+            "D9: complete with agreement=-1 -> 200, stored verbatim",
+            status, body, 200, ["activation"],
+        )
+        status, _, body = _hit(
+            "GET", f"{base}/sdk-api/activation/{d9_code3}", d9_h,
+        )
+        sensie_d9_neg1 = body["data"]["activation"]["sensie"]
+        ok = (
+            isinstance(sensie_d9_neg1, dict)
+            and sensie_d9_neg1.get("whips") == 1
+            and sensie_d9_neg1.get("flowing") == 1
+            and sensie_d9_neg1.get("agreement") == -1
+        )
+        _step(
+            "D9: agreement=-1 -> GET sensie.agreement is -1",
+            ok,
+            f"sensie={sensie_d9_neg1!r}",
+        )
+
+        # D9 case D: agreement=0 still rejected. (The earlier "400 invalid_payload
+        # (agreement=0)" assertion already covers the existing-code path; here
+        # we cover the D7 ordering on an UNKNOWN code — a bad payload must
+        # never become an oracle for which codes are real, so 0 on an unknown
+        # code must also be 400.)
+        status, _, body = _hit(
+            "PATCH",
+            f"{base}/sdk-api/activation/BBBBBBBB/complete", ha,
+            {"whips": 0, "flowing": 1, "agreement": 0},
+        )
+        expect_error(
+            "D9: 400 invalid_payload (agreement=0 on unknown code)",
+            status, body, 400, "invalid_payload",
+        )
+
         # --- error taxonomy: one observation per error code --------------
 
         # 401 unauthorized: bad x-api-key (wrong shape)

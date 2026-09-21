@@ -50,6 +50,12 @@ this mock's behaviour:
       whether or not the code exists: payload is validated BEFORE the code
       is looked up, so a bad body never reveals whether a code is real.
   D8  Rollback SQL keeps the trial_consents and activation_codes tables.
+  D9  agreement is optional. Complete accepts agreement OMITTED or JSON
+      null -> stored as NULL; if present and non-null it must be in
+      {-1, 1, 2}, else 400 invalid_payload (so agreement=0 is rejected).
+      whips (int >= 0) and flowing (1 or -1) remain REQUIRED. GET after
+      completion returns sensie = {whips, flowing, agreement} with
+      agreement == null when it was not provided.
 
 Endpoints (all under /sdk-api/...):
     POST  /sdk-api/trial/consent              auth: x-api-key (trial key)
@@ -393,9 +399,18 @@ class _Store:
         if flowing not in VALID_FLOWING:
             raise _ApiError(400, "invalid_payload",
                             f"flowing must be one of {list(VALID_FLOWING)}")
-        if agreement not in VALID_AGREEMENT:
-            raise _ApiError(400, "invalid_payload",
-                            f"agreement must be one of {list(VALID_AGREEMENT)}")
+        # D9: agreement is OPTIONAL. The handler passes body.get("agreement"),
+        # which is None for both "omitted" and "JSON null"; both are stored
+        # as null. If agreement is PRESENT and NON-null it must be in
+        # {-1, 1, 2} — so agreement=0 (or anything outside the set) is
+        # still a 400, mirroring the real backend's nullability + CHECK
+        # constraint in a single value-domain test.
+        if agreement is not None and agreement not in VALID_AGREEMENT:
+            raise _ApiError(
+                400, "invalid_payload",
+                f"agreement must be one of {list(VALID_AGREEMENT)} "
+                "(or omitted / null)",
+            )
         with self._lock:
             rec = self._codes.get(code)
             if rec is None:

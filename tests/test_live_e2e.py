@@ -496,6 +496,260 @@ class TestLiveStatus(_CliHarness):
 
 
 # ---------------------------------------------------------------------------
+# Case 3b — D9: agreement is optional; null renders as 'not provided'
+# ---------------------------------------------------------------------------
+
+
+def _patch_json_no_agreement(url, app_secret=APP_SECRET):
+    """Like _patch_json but sends a body with NO `agreement` key at all,
+    mirroring the real SomaCheck app (which never invents an agreement
+    value). The mock must accept this as a valid complete (D9)."""
+    body = json.dumps({"whips": 3, "flowing": 1}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body,
+        headers={
+            "x-app-secret": app_secret,
+            "Content-Type": "application/json",
+        },
+        method="PATCH",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            return exc.code, json.loads(raw)
+        except json.JSONDecodeError:
+            return exc.code, {"raw": raw}
+
+
+def _get_json(url, api_key=TRIAL_KEY):
+    """GET via x-api-key. Used to inspect activation state after a write."""
+    req = urllib.request.Request(
+        url, headers={"x-api-key": api_key}, method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            return exc.code, json.loads(raw)
+        except json.JSONDecodeError:
+            return exc.code, {"raw": raw}
+
+
+def _issue_pending_code_via_mock(harness):
+    """Issue one activation code directly against the harness's in-process
+    mock. Returns (consent_id, code, activation_body).
+
+    Lives at module scope so both TestLiveStatus and TestLiveAgreementOptional
+    can reuse it (TestLiveStatus keeps its existing _issue_code_via_consent
+    for backwards-compat)."""
+    status, body = _post_json(
+        f"{harness.base_url}/sdk-api/trial/consent",
+        {"consent_version": "live-gesture-v1-draft",
+         "scope": "live-gesture", "accepted": True},
+    )
+    harness.assertEqual(status, 201, body)
+    consent_id = body["data"]["consent"]["id"]
+    status, body = _post_json(
+        f"{harness.base_url}/sdk-api/trial/activation-code",
+        {"consent_id": consent_id},
+    )
+    harness.assertEqual(status, 201, body)
+    code = body["data"]["activation"]["code"]
+    expires_at = body["data"]["activation"]["expires_at"]
+    return consent_id, code, expires_at
+
+
+class TestLiveAgreementOptional(_CliHarness):
+    """D9: the SomaCheck app never sends an `agreement` value (it's optional
+    feedback collected AFTER the reveal and must never be invented). The
+    contract says complete must accept agreement OMITTED or null, the GET
+    returns sensie.agreement == null, and the CLI must render that as
+    'not provided' — never 0, never a default, never any verdict derived
+    from agreement. Mirrors Lane 3's print_live_report change.
+
+    Three sub-cases required by the lane brief:
+      A. `run --live` after a complete-with-agreement-OMITTED — the printed
+         read shows 'agreement: not provided' (not 'None', not '0').
+      B. `status <code>` after the same — same line in the status report.
+      C. complete with agreement=2 still prints 'agreement: 2' (value path
+         is unchanged from the existing happy-path assertion; re-confirmed
+         in this class for symmetry).
+      D. agreement=0 is rejected with 400 invalid_payload, surfaced as a
+         non-zero exit (the simulated app surfaces the 400; the CLI's
+         poll loop sees a SensieApiError and exits 1).
+    """
+
+    def _app_thread_complete_no_agreement(self, prior_codes):
+        """Simulated SomaCheck: claim, then complete with NO agreement key.
+        The mock must accept this (D9). The CLI's read of the resulting
+        sensie is asserted by the calling test."""
+        code = _wait_for_new_code(
+            self.server, prior_codes, timeout=15.0,
+        )
+        status, body = _post_json(
+            f"{self.base_url}/sdk-api/activation/{code}/claim",
+            {"device_id": DEVICE_ID},
+            app_secret=APP_SECRET,
+        )
+        self.assertEqual(status, 200, f"claim failed: {body}")
+        status, body = _patch_json_no_agreement(
+            f"{self.base_url}/sdk-api/activation/{code}/complete",
+        )
+        self.assertEqual(
+            status, 200,
+            f"complete (no agreement) must succeed per D9; "
+            f"got {status} {body}",
+        )
+
+    def test_run_live_prints_agreement_not_provided_when_omitted(self):
+        """A. `run --live` after a no-agreement complete must print
+        `agreement: not provided` (not None, not 0, not the int 2)."""
+        prior_codes = set(self.server.store._codes.keys())
+
+        thread = threading.Thread(
+            target=self._app_thread_complete_no_agreement,
+            args=(prior_codes,), daemon=True,
+        )
+        thread.start()
+
+        exit_code, out, err = self._run_main(
+            ["run", "--live", "--yes", "--poll-interval", "1",
+             "--timeout", "5"]
+        )
+        thread.join(timeout=20.0)
+
+        self.assertEqual(exit_code, 0,
+                         f"err={err!r}\nout={out!r}")
+        # The line printed by print_live_report when read['agreement']
+        # is None — Lane 3's contract for D9.
+        self.assertIn("agreement: not provided", out,
+                      f"expected 'agreement: not provided' in:\n{out}")
+        # And explicitly NOT the strings the CLI must never emit:
+        #   - "agreement: None"  (would mean we forgot to format)
+        #   - "agreement: 0"     (would mean we defaulted to a sentinel)
+        #   - "agreement: 2"     (would mean we invented a verdict)
+        self.assertNotIn("agreement: None", out)
+        self.assertNotIn("agreement: 0\n", out)
+        self.assertNotIn("agreement: 2\n", out)
+        # The other two scalars from the complete payload still print.
+        self.assertIn("whips:     3", out)
+        self.assertIn("flowing:   1", out)
+
+    def test_status_prints_agreement_not_provided_when_omitted(self):
+        """B. `status <code>` after a no-agreement complete prints the same
+        'agreement: not provided' line."""
+        # Issue + claim + complete-with-no-agreement directly via HTTP.
+        _, code, _ = _issue_pending_code_via_mock(self)
+        status, _ = _post_json(
+            f"{self.base_url}/sdk-api/activation/{code}/claim",
+            {"device_id": DEVICE_ID},
+            app_secret=APP_SECRET,
+        )
+        self.assertEqual(status, 200)
+        status, body = _patch_json_no_agreement(
+            f"{self.base_url}/sdk-api/activation/{code}/complete",
+        )
+        self.assertEqual(status, 200, body)
+
+        exit_code, out, err = self._run_main(["status", code])
+        self.assertEqual(exit_code, 0, f"err={err!r}\nout={out!r}")
+        self.assertIn("agreement: not provided", out,
+                      f"status report must show 'agreement: not provided'; "
+                      f"got:\n{out}")
+        # Same negative checks as above.
+        self.assertNotIn("agreement: None", out)
+        self.assertNotIn("agreement: 0\n", out)
+        self.assertNotIn("agreement: 2\n", out)
+
+    def test_run_live_still_prints_agreement_value_when_provided(self):
+        """C. The value-path is unchanged: complete with agreement=2 still
+        prints 'agreement: 2' (Lane 3's renderer formats a non-None value
+        as-is). Re-confirms we did not regress the old happy path."""
+        prior_codes = set(self.server.store._codes.keys())
+
+        app_done = threading.Event()
+        app_error = []
+
+        def simulate_app():
+            try:
+                code = _wait_for_new_code(
+                    self.server, prior_codes, timeout=15.0,
+                )
+                status, body = _post_json(
+                    f"{self.base_url}/sdk-api/activation/{code}/claim",
+                    {"device_id": DEVICE_ID},
+                    app_secret=APP_SECRET,
+                )
+                self.assertEqual(status, 200, f"claim failed: {body}")
+                status, body = _patch_json(
+                    f"{self.base_url}/sdk-api/activation/{code}/complete",
+                    {"whips": 3, "flowing": 1, "agreement": 2},
+                )
+                self.assertEqual(status, 200, f"complete failed: {body}")
+            except Exception as exc:  # noqa: BLE001
+                app_error.append(exc)
+            finally:
+                app_done.set()
+
+        thread = threading.Thread(target=simulate_app, daemon=True)
+        thread.start()
+        exit_code, out, err = self._run_main(
+            ["run", "--live", "--yes", "--poll-interval", "1",
+             "--timeout", "5"]
+        )
+        thread.join(timeout=20.0)
+        self.assertFalse(app_error, f"app thread error: {app_error!r}")
+
+        self.assertEqual(exit_code, 0, f"err={err!r}\nout={out!r}")
+        self.assertIn("agreement: 2", out,
+                      f"value-path agreement must still print; got:\n{out}")
+        # And NOT 'not provided'.
+        self.assertNotIn("agreement: not provided", out)
+
+    def test_complete_with_agreement_zero_is_rejected(self):
+        """D. agreement=0 is NOT in {-1, 1, 2}, so it must 400. Drive
+        this by issuing a code, claiming it, and sending complete with
+        agreement=0 directly. The mock must return 400 invalid_payload
+        (value-domain is checked before the code is looked up — D7 —
+        and agreement=0 is still out-of-domain after D9)."""
+        _, code, _ = _issue_pending_code_via_mock(self)
+        status, _ = _post_json(
+            f"{self.base_url}/sdk-api/activation/{code}/claim",
+            {"device_id": DEVICE_ID},
+            app_secret=APP_SECRET,
+        )
+        self.assertEqual(status, 200)
+        status, body = _patch_json(
+            f"{self.base_url}/sdk-api/activation/{code}/complete",
+            {"whips": 3, "flowing": 1, "agreement": 0},
+        )
+        self.assertEqual(
+            status, 400,
+            f"agreement=0 must be rejected with 400; got {status} {body!r}",
+        )
+        self.assertEqual(body.get("error"), "invalid_payload", body)
+        # And the code must NOT have been completed (single-use, atomic).
+        # Subsequent GET must still see status=claimed.
+        status, body = _get_json(
+            f"{self.base_url}/sdk-api/activation/{code}",
+        )
+        self.assertEqual(status, 200, body)
+        # GET shape: status is "claimed" (a 400 on complete doesn't flip
+        # the code to completed; the value-domain check is upfront).
+        inner = body["data"]["activation"]
+        self.assertEqual(
+            inner.get("status"), "claimed",
+            f"a 400 on complete must not flip the code to completed; "
+            f"got activation={inner!r}",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Case 4 — rate limit (4th outstanding code)
 # ---------------------------------------------------------------------------
 
