@@ -355,7 +355,7 @@ def _seconds_remaining(expires_at):
 
 def _format_remaining(expires_at):
     seconds = _seconds_remaining(expires_at)
-    if seconds is None:
+    if not seconds:  # unparseable, or local clock says lapsed: say nothing
         return ""
     minutes, secs = divmod(seconds, 60)
     return f" ({minutes}m {secs:02d}s left on the code)"
@@ -548,7 +548,7 @@ You are about to hand over a real gesture. Only the three derived values
 (whips, flowing, agreement) come back; raw motion stays on the phone.
 Press Ctrl-C to stop waiting at any time; the code keeps working until it
 expires.
-""")
+""", flush=True)
     try:
         return wait_for_activation(client, code, args.poll_interval,
                                    args.timeout, expires_at)
