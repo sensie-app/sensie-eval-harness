@@ -164,8 +164,9 @@ def print_live_report(read):
           "not synthetic data.")
     print(f"  whips:     {read['whips']}")
     print(f"  flowing:   {read['flowing']}")
-    print(f"  agreement: {read['agreement']}")
-    print("Only these three values left your phone; raw motion did not.")
+    agreement = read.get("agreement")
+    print(f"  agreement: {'not provided' if agreement is None else agreement}")
+    print("Only these values left your phone; raw motion did not.")
 
 
 def print_routing_report(reads, live=False):

@@ -50,6 +50,7 @@ from sensie_eval.cli import (
 FAKE_KEY = "sk_sensie_" + "0" * 64
 CODE = "ABCD2345"
 READ = {"whips": 3, "flowing": 1, "agreement": 2}
+READ_NO_AGREEMENT = {"whips": 3, "flowing": 1, "agreement": None}
 
 
 def make_client(states=None):
@@ -230,8 +231,20 @@ class TestUpfrontAndPolling(LiveTestCase):
         self.assertIn("whips:     3", out)
         self.assertIn("flowing:   1", out)
         self.assertIn("agreement: 2", out)
+        self.assertNotIn("not provided", out)
         self.assertNotIn("SYNTHETIC", out)
         self.assertNotIn("annotator", out.split("Your live read")[1])
+        self.assertNotIn("Route accordingly", out)
+
+    def test_null_agreement_renders_not_provided(self):
+        client = make_client([act("completed", READ_NO_AGREEMENT)])
+        code, out, _ = self.invoke(["run", "--live", "--yes"], client)
+        self.assertEqual(code, 0)
+        self.assertIn("whips:     3", out)
+        self.assertIn("flowing:   1", out)
+        self.assertIn("agreement: not provided", out)
+        self.assertNotIn("agreement: 0", out)
+        self.assertNotIn("agreement: None", out)
         self.assertNotIn("Route accordingly", out)
 
     def test_expired_exits_76(self):
@@ -288,6 +301,22 @@ class TestStatusCommand(LiveTestCase):
         self.assertNotIn("SYNTHETIC", out)
         client.get_activation.assert_called_once_with(CODE)
         client.post_consent.assert_not_called()
+
+    def test_completed_with_agreement(self):
+        client = make_client([act("completed", READ)])
+        code, out, _ = self.invoke(["status", CODE], client)
+        self.assertEqual(code, 0)
+        self.assertIn("agreement: 2", out)
+        self.assertNotIn("not provided", out)
+
+    def test_completed_null_agreement_renders_not_provided(self):
+        client = make_client([act("completed", READ_NO_AGREEMENT)])
+        code, out, _ = self.invoke(["status", CODE], client)
+        self.assertEqual(code, 0)
+        self.assertIn("Your live read", out)
+        self.assertIn("agreement: not provided", out)
+        self.assertNotIn("agreement: 0", out)
+        self.assertNotIn("agreement: None", out)
 
     def test_expired(self):
         client = make_client([act("expired")])

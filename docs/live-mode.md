@@ -18,9 +18,11 @@ Raw motion stays on the phone and is never sent anywhere. The only things that c
 |-------|------|-------|
 | `whips` | integer | 0 or more |
 | `flowing` | integer | `1` or `-1` |
-| `agreement` | integer | `-1`, `1`, or `2` |
+| `agreement` | integer, optional | `-1`, `1`, or `2` — or not provided |
 
 Those are the same three fields as the [`sensie` endpoint](api-reference.md#post-sdk-apisessionsessionidsensie). Nothing else is captured or shared. You can stop at any time.
+
+`agreement` may be **not provided**. In the app it is optional feedback collected *after* the reveal, so it does not exist yet when the gesture completes, and the app never fills it in or guesses it. When it is missing, the CLI prints `agreement: not provided` (never `0` or any default) and nothing it prints is derived from agreement.
 
 Consent is collected **in the terminal, before a code exists**. The CLI prints the consent text and asks for a yes; only then does it record your consent with Sensie and request a code. If you say no, nothing is sent.
 
@@ -39,7 +41,7 @@ The CLI then:
 2. records consent, then requests an activation code,
 3. prints the install link, your 8-character code, and the `somacheck://activate/<CODE>` link,
 4. checks the code every 10 seconds and prints a status line each time it changes: `pending` (waiting for the code to be entered), `claimed` (entered in the app; calibration and gesture in progress), then `completed`,
-5. prints your three values.
+5. prints your values (`agreement` reads `not provided` when the app did not send one).
 
 In the app, open SomaCheck (install link: https://go.somacheck.com/install), enter the code, and do the gesture. The result appears in your terminal when the app finishes.
 
@@ -52,10 +54,12 @@ Real gesture, done on your phone in the SomaCheck app — not synthetic data.
   whips:     3
   flowing:   1
   agreement: 2
-Only these three values left your phone; raw motion did not.
+Only these values left your phone; raw motion did not.
 ```
 
-The three values are shown as the app derived them. The CLI does not score, rank, or route anyone from them.
+When the app did not send an agreement value, that line reads `  agreement: not provided` and the rest is the same.
+
+The values are shown as the app derived them. The CLI does not score, rank, or route anyone from them.
 
 ### Flags
 
@@ -82,7 +86,7 @@ $ sensie-eval status ABCD2345
 
 `status` makes one request and prints one of:
 
-- **completed** — your three values, exit 0.
+- **completed** — your values (`agreement` may read `not provided`), exit 0.
 - **pending** or **claimed** — the status and the time left on the code, exit 0.
 - **expired** — exit 76 (see below).
 
