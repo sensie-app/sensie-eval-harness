@@ -212,14 +212,47 @@ def main() -> int:
 
         status, _, body = _hit("POST", f"{base}/sdk-api/activation/{code}/claim",
                                ha, {"device_id": "ios-sim-1"})
-        expect_envelope_ok("claim succeeded", status, body, 200, ["status"])
-        assert body["data"]["status"] == "claimed"
+        # D4: claim 200 body shape is {status, data: {activation: {status: "claimed", expires_at}}}.
+        expect_envelope_ok("claim succeeded", status, body, 200, ["activation"])
+        activation_claim = body["data"]["activation"]
+        assert activation_claim["status"] == "claimed", \
+            f"expected status=claimed, got {activation_claim!r}"
+        try:
+            _dt.datetime.strptime(
+                activation_claim["expires_at"], "%Y-%m-%dT%H:%M:%SZ",
+            )
+        except (KeyError, ValueError) as exc:
+            raise AssertionError(
+                f"claim activation.expires_at missing or not ISO-8601 UTC: "
+                f"{activation_claim!r} ({exc})"
+            )
+        # The 'code' field is NOT part of the D4 success body — the contract
+        # deliberately mirrors the GET shape so the same parser works on both.
+        assert "code" not in activation_claim, \
+            f"claim body must not leak the code: {activation_claim!r}"
 
         status, _, body = _hit(
             "PATCH", f"{base}/sdk-api/activation/{code}/complete", ha,
             {"whips": 3, "flowing": 1, "agreement": 2},
         )
-        expect_envelope_ok("complete succeeded", status, body, 200, ["status"])
+        # D4: complete 200 body shape is {status, data: {activation: {status: "completed", completed_at}}}.
+        expect_envelope_ok("complete succeeded", status, body, 200, ["activation"])
+        activation_complete = body["data"]["activation"]
+        assert activation_complete["status"] == "completed", \
+            f"expected status=completed, got {activation_complete!r}"
+        try:
+            _dt.datetime.strptime(
+                activation_complete["completed_at"], "%Y-%m-%dT%H:%M:%SZ",
+            )
+        except (KeyError, ValueError) as exc:
+            raise AssertionError(
+                f"complete activation.completed_at missing or not ISO-8601 UTC: "
+                f"{activation_complete!r} ({exc})"
+            )
+        assert "expires_at" not in activation_complete, (
+            "complete body uses completed_at, not expires_at: "
+            f"{activation_complete!r}"
+        )
 
         status, _, body = _hit("GET", f"{base}/sdk-api/activation/{code}", h)
         expect_envelope_ok("GET completed", status, body, 200, ["activation"])
@@ -262,6 +295,35 @@ def main() -> int:
         expect_error("400 invalid_payload (consent scope)",
                      status, body, 400, "invalid_payload")
 
+        # --- D5: bounded consent_version (1-64 chars, no control chars) ---
+        # Use a fresh key so we don't burn consents on the main one.
+        d5_key = "sk_sensie_" + "e" * 64
+        d5_h = {"x-api-key": d5_key}
+
+        # 400 invalid_payload: consent_version empty
+        status, _, body = _hit("POST", f"{base}/sdk-api/trial/consent", d5_h, {
+            "consent_version": "", "scope": "live-gesture", "accepted": True,
+        })
+        expect_error("D5: 400 invalid_payload (consent_version empty)",
+                     status, body, 400, "invalid_payload")
+
+        # 400 invalid_payload: consent_version too long (65 chars)
+        status, _, body = _hit("POST", f"{base}/sdk-api/trial/consent", d5_h, {
+            "consent_version": "v" * 65, "scope": "live-gesture",
+            "accepted": True,
+        })
+        expect_error("D5: 400 invalid_payload (consent_version 65 chars)",
+                     status, body, 400, "invalid_payload")
+
+        # 400 invalid_payload: consent_version contains a control character
+        # (newline). Control characters (0x00-0x1F, 0x7F) are forbidden.
+        status, _, body = _hit("POST", f"{base}/sdk-api/trial/consent", d5_h, {
+            "consent_version": "v1\n", "scope": "live-gesture",
+            "accepted": True,
+        })
+        expect_error("D5: 400 invalid_payload (consent_version control char)",
+                     status, body, 400, "invalid_payload")
+
         # 403 consent_required: activation-code with unknown consent_id
         status, _, body = _hit(
             "POST", f"{base}/sdk-api/trial/activation-code", h,
@@ -282,6 +344,44 @@ def main() -> int:
             {"consent_id": other_consent},
         )
         expect_error("403 consent_required (other key's consent)",
+                     status, body, 403, "consent_required")
+
+        # --- D3: split failure modes for consent_id ----------------------
+        # The payload shape is bad -> 400 invalid_payload; the value is a
+        # present-but-not-UUID string -> 403 consent_required (the string
+        # cannot be an identifier, so it is functionally unknown; 400 would
+        # disclose format vs existence).
+
+        # 400 invalid_payload: consent_id missing entirely
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/activation-code", h,
+            {"scope": "live-gesture"},
+        )
+        expect_error("D3: 400 invalid_payload (consent_id missing)",
+                     status, body, 400, "invalid_payload")
+
+        # 400 invalid_payload: consent_id empty string
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/activation-code", h,
+            {"consent_id": ""},
+        )
+        expect_error("D3: 400 invalid_payload (consent_id empty string)",
+                     status, body, 400, "invalid_payload")
+
+        # 400 invalid_payload: consent_id not a string (integer)
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/activation-code", h,
+            {"consent_id": 12345},
+        )
+        expect_error("D3: 400 invalid_payload (consent_id non-string)",
+                     status, body, 400, "invalid_payload")
+
+        # 403 consent_required: consent_id present but not a well-formed UUID
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/activation-code", h,
+            {"consent_id": "not-a-uuid"},
+        )
+        expect_error("D3: 403 consent_required (consent_id non-UUID)",
                      status, body, 403, "consent_required")
 
         # 404 code_not_found: claim unknown
@@ -307,6 +407,51 @@ def main() -> int:
         )
         expect_error("404 code_not_found (complete unknown)", status, body,
                      404, "code_not_found")
+
+        # --- D6: a malformed code path segment is 404 code_not_found ----
+        # Spec: {code} must be exactly 8 chars of ABCDEFGHJKMNPQRSTUVWXYZ23456789
+        # (case-insensitive). Anything else -> 404 code_not_found on claim,
+        # complete, AND GET. Use codes that share length and alphabet
+        # boundaries so the test would fail if the matcher only checks length.
+
+        # D6: contains 'I' (excluded from Crockford alphabet)
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/activation/ABCDEFIH/claim", ha,
+            {"device_id": "d"},
+        )
+        expect_error("D6: 404 code_not_found (claim, 'I' in code)",
+                     status, body, 404, "code_not_found")
+
+        # D6: contains '0' (excluded from Crockford alphabet)
+        status, _, body = _hit(
+            "PATCH", f"{base}/sdk-api/activation/ABCD0FGH/complete", ha,
+            {"whips": 0, "flowing": 1, "agreement": 1},
+        )
+        expect_error("D6: 404 code_not_found (complete, '0' in code)",
+                     status, body, 404, "code_not_found")
+
+        # D6: too short (7 chars)
+        status, _, body = _hit(
+            "GET", f"{base}/sdk-api/activation/ABCDEFG", h,
+        )
+        expect_error("D6: 404 code_not_found (GET, code 7 chars)",
+                     status, body, 404, "code_not_found")
+
+        # D6: too long (9 chars)
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/activation/ABCDEFGHJ/claim", ha,
+            {"device_id": "d"},
+        )
+        expect_error("D6: 404 code_not_found (claim, code 9 chars)",
+                     status, body, 404, "code_not_found")
+
+        # D6: contains special character
+        status, _, body = _hit(
+            "PATCH", f"{base}/sdk-api/activation/ABCD!FGH/complete", ha,
+            {"whips": 0, "flowing": 1, "agreement": 1},
+        )
+        expect_error("D6: 404 code_not_found (complete, '!' in code)",
+                     status, body, 404, "code_not_found")
 
         # 410 code_already_claimed: claim after claim
         # Issue + claim a fresh code first.
@@ -373,6 +518,71 @@ def main() -> int:
             )
             expect_error(f"400 invalid_payload ({label})", status, body, 400,
                          "invalid_payload")
+
+        # --- D7: payload is validated BEFORE the code is looked up ------
+        # A bad payload must return 400 invalid_payload whether the code
+        # EXISTS or NOT — otherwise bad payloads become an oracle for
+        # which codes are real. Test against an unknown code (the one
+        # most likely to leak). Pick a valid Crockford-shape code so D6
+        # does not intervene.
+        for bad_payload, label in [
+            ({"whips": -1, "flowing": 1, "agreement": 1},
+             "whips negative (unknown code)"),
+            ({"whips": 1, "flowing": 0, "agreement": 1},
+             "flowing=0 (unknown code)"),
+            ({"whips": 1, "flowing": 1, "agreement": 0},
+             "agreement=0 (unknown code)"),
+        ]:
+            status, _, body = _hit(
+                "PATCH",
+                f"{base}/sdk-api/activation/AAAAAAAA/complete",
+                ha,
+                bad_payload,
+            )
+            expect_error(
+                f"D7: 400 invalid_payload ({label})", status, body, 400,
+                "invalid_payload",
+            )
+
+        # --- D5: bounded device_id (1-200 chars, no control chars) ------
+        # Issue a fresh code so we can test device_id independently.
+        d5d_key = "sk_sensie_" + "f" * 64
+        d5d_h = {"x-api-key": d5d_key}
+        status, _, body = _hit("POST", f"{base}/sdk-api/trial/consent",
+                               d5d_h, {
+            "consent_version": "v1", "scope": "live-gesture",
+            "accepted": True,
+        })
+        d5d_cid = body["data"]["consent"]["id"]
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/activation-code", d5d_h,
+            {"consent_id": d5d_cid},
+        )
+        d5d_code = body["data"]["activation"]["code"]
+
+        # D5: device_id empty
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/activation/{d5d_code}/claim", ha,
+            {"device_id": ""},
+        )
+        expect_error("D5: 400 invalid_payload (device_id empty)",
+                     status, body, 400, "invalid_payload")
+
+        # D5: device_id too long (201 chars)
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/activation/{d5d_code}/claim", ha,
+            {"device_id": "d" * 201},
+        )
+        expect_error("D5: 400 invalid_payload (device_id 201 chars)",
+                     status, body, 400, "invalid_payload")
+
+        # D5: device_id contains a control character (newline)
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/activation/{d5d_code}/claim", ha,
+            {"device_id": "ios\n"},
+        )
+        expect_error("D5: 400 invalid_payload (device_id control char)",
+                     status, body, 400, "invalid_payload")
 
         # 429 rate_limited: exceed outstanding-code limit (3). We already
         # have code (completed) and code2 (completed) and code3 (claimed)

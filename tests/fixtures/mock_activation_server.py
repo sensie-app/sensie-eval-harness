@@ -32,6 +32,25 @@ additive CONTRACT CLARIFICATIONS C1..C10 from briefs/COMMON.md:
       error field, not the status.)
   C10 install_url = https://go.somacheck.com/install.
 
+And the additive DELTAS D1..D8 from briefs/CONTRACT-DELTA.md (Lane 1, the
+real backend). D1/D2 are schema-only with no wire change; D3..D7 affect
+this mock's behaviour:
+
+  D3  consent_id missing / empty / non-string -> 400 invalid_payload;
+      present but not a well-formed UUID -> 403 consent_required.
+  D4  claim / complete 200 bodies carry an activation object that mirrors
+      the GET shape: claim -> {status:"claimed", expires_at}; complete ->
+      {status:"completed", completed_at}. ISO-8601 UTC.
+  D5  Bounded free-text: consent_version 1-64 chars, device_id 1-200 chars;
+      control characters (0x00-0x1F, 0x7F) forbidden. Violation -> 400.
+  D6  A {code} path segment that is not exactly 8 chars of the Crockford
+      alphabet (case-insensitive) -> 404 code_not_found on claim, complete
+      AND GET. A code that cannot exist is a code that does not exist.
+  D7  On complete, a value-domain violation returns 400 invalid_payload
+      whether or not the code exists: payload is validated BEFORE the code
+      is looked up, so a bad body never reveals whether a code is real.
+  D8  Rollback SQL keeps the trial_consents and activation_codes tables.
+
 Endpoints (all under /sdk-api/...):
     POST  /sdk-api/trial/consent              auth: x-api-key (trial key)
     POST  /sdk-api/trial/activation-code      auth: x-api-key
@@ -74,11 +93,30 @@ CONTRACT_VERSION = "v1"
 INSTALL_URL = "https://go.somacheck.com/install"
 CONSENT_SCOPE = "live-gesture"
 
-# C4: Crockford-style alphabet (no I/L/O/1/0). Case-insensitive on input;
-# server stores uppercase.
+# C4 / D6: Crockford-style alphabet (no I/L/O/1/0). Case-insensitive on input;
+# server stores uppercase. D6 tightens the path-segment matcher to exactly
+# 8 chars from this alphabet; anything else is 404 code_not_found.
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 CODE_LENGTH = 8
-CODE_RE = re.compile(f"^[A-Z0-9]{{{CODE_LENGTH}}}$")
+CODE_RE = re.compile(f"^[{CODE_ALPHABET}]{{{CODE_LENGTH}}}$")
+
+# D5: bounded free-text fields.
+CONSENT_VERSION_MIN = 1
+CONSENT_VERSION_MAX = 64
+DEVICE_ID_MIN = 1
+DEVICE_ID_MAX = 200
+# ASCII control characters (0x00-0x1F, 0x7F) are forbidden in free-text
+# fields per D5.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# D3: well-formed UUID match — anything that is not a UUID format is
+# either a missing/empty/non-string (handled separately as 400) or a
+# malformed UUID (handled here as 403 consent_required, since a string
+# that cannot be an identifier is functionally unknown).
+UUID_FORMAT_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 # C2: trial key shape. The mock REJECTS anything else with 401.
 TRIAL_KEY_PREFIX = "sk_sensie_"
@@ -180,9 +218,20 @@ class _Store:
         if scope != CONSENT_SCOPE:
             raise _ApiError(400, "invalid_payload",
                             f"scope must be \"{CONSENT_SCOPE}\"")
+        # D5: consent_version is 1-64 chars, no control characters.
         if not isinstance(consent_version, str) or not consent_version:
             raise _ApiError(400, "invalid_payload",
                             "consent_version is required")
+        if (len(consent_version) < CONSENT_VERSION_MIN
+                or len(consent_version) > CONSENT_VERSION_MAX):
+            raise _ApiError(400, "invalid_payload",
+                            f"consent_version must be "
+                            f"{CONSENT_VERSION_MIN}-{CONSENT_VERSION_MAX} "
+                            "characters")
+        if _CONTROL_CHAR_RE.search(consent_version):
+            raise _ApiError(400, "invalid_payload",
+                            "consent_version must not contain control "
+                            "characters")
         with self._lock:
             cid = str(uuid.uuid4())
             self._consents[cid] = {
@@ -307,19 +356,36 @@ class _Store:
             if rec["status"] != "pending":
                 raise _ApiError(410, "code_already_claimed",
                                 f"code is {rec['status']}")
+            # D5: device_id is 1-200 chars, no control characters.
             if not isinstance(device_id, str) or not device_id:
                 raise _ApiError(400, "invalid_payload",
                                 "device_id is required")
+            if (len(device_id) < DEVICE_ID_MIN
+                    or len(device_id) > DEVICE_ID_MAX):
+                raise _ApiError(400, "invalid_payload",
+                                f"device_id must be "
+                                f"{DEVICE_ID_MIN}-{DEVICE_ID_MAX} "
+                                "characters")
+            if _CONTROL_CHAR_RE.search(device_id):
+                raise _ApiError(400, "invalid_payload",
+                                "device_id must not contain control "
+                                "characters")
             rec["status"] = "claimed"
             rec["claimed_at"] = self.now()
             rec["device_id"] = device_id
-            return {"status": "claimed", "code": code}
+            # D4: success body shape matches the GET shape: an activation
+            # object with status + ISO-8601 expires_at.
+            return {"activation": {
+                "status": "claimed",
+                "expires_at": self._iso(rec["expires_at"]),
+            }}
 
     def complete(self, code: str, whips: Any, flowing: Any,
                  agreement: Any) -> Dict[str, Any]:
-        # C7: validate the value domain first so the same shape of error
-        # fires whether the code exists or not (real backend rejects payload
-        # BEFORE looking up the code; mirror that ordering).
+        # C7 / D7: validate the value domain FIRST so the same shape of
+        # error fires whether the code exists or not. Real backend rejects
+        # payload BEFORE looking up the code; mirror that ordering so a
+        # bad payload is never an oracle for which codes exist.
         if (not isinstance(whips, int) or isinstance(whips, bool)
                 or whips < 0):
             raise _ApiError(400, "invalid_payload",
@@ -353,7 +419,12 @@ class _Store:
                 "flowing": flowing,
                 "agreement": agreement,
             }
-            return {"status": "completed", "code": code}
+            # D4: success body shape matches the GET shape: an activation
+            # object with status + ISO-8601 completed_at.
+            return {"activation": {
+                "status": "completed",
+                "completed_at": self._iso(rec["completed_at"]),
+            }}
 
     def public_view(self, rec: Dict[str, Any]) -> Dict[str, Any]:
         """The exact shape returned by GET /sdk-api/activation/{code}."""
@@ -526,9 +597,20 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/sdk-api/trial/activation-code":
             key_id = self._key_id()
             body = self._read_json()
+            # D3: split the failure modes for consent_id.
+            #   - missing / empty / not a string -> 400 invalid_payload
+            #     (the payload itself is malformed; nothing to look up).
+            #   - present but not a well-formed UUID -> 403 consent_required
+            #     (a string that cannot be an identifier is functionally
+            #     unknown; 400 would disclose format vs existence).
             consent_id = body.get("consent_id")
             if not isinstance(consent_id, str) or not consent_id:
-                raise _ApiError(400, "invalid_payload", "consent_id is required")
+                raise _ApiError(400, "invalid_payload",
+                                "consent_id is required")
+            if not UUID_FORMAT_RE.match(consent_id):
+                raise _ApiError(403, "consent_required",
+                                "consent id is unknown, revoked, or does "
+                                "not belong to this key")
             activation = self._store().create_code(
                 key_id=key_id, consent_id=consent_id,
             )
@@ -536,13 +618,18 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         # claim: POST /sdk-api/activation/{code}/claim
+        # D6: the {code} segment must be exactly 8 chars of the Crockford
+        # alphabet; anything else -> 404 code_not_found.
         m = re.match(r"^/sdk-api/activation/([A-Z0-9]{1,16})/claim$", path)
+        if m and not CODE_RE.match(m.group(1)):
+            raise _ApiError(404, "code_not_found",
+                            "no such endpoint")
         if m:
             self._require_app_secret()
             code = m.group(1).upper()
             body = self._read_json()
-            self._store().claim(code, body.get("device_id", ""))
-            self._ok({"status": "claimed", "code": code})
+            data = self._store().claim(code, body.get("device_id", ""))
+            self._ok(data)
             return
 
         raise _ApiError(404, "code_not_found", "no such endpoint")
@@ -551,25 +638,35 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         path = _normalize_activation_path(path)
         # PATCH /sdk-api/activation/{code}/complete
+        # D6: the {code} segment must be exactly 8 chars of the Crockford
+        # alphabet; anything else -> 404 code_not_found.
         m = re.match(r"^/sdk-api/activation/([A-Z0-9]{1,16})/complete$", path)
+        if m and not CODE_RE.match(m.group(1)):
+            raise _ApiError(404, "code_not_found",
+                            "no such endpoint")
         if not m:
             raise _ApiError(404, "code_not_found", "no such endpoint")
         self._require_app_secret()
         code = m.group(1).upper()
         body = self._read_json()
-        self._store().complete(
+        data = self._store().complete(
             code,
             whips=body.get("whips"),
             flowing=body.get("flowing"),
             agreement=body.get("agreement"),
         )
-        self._ok({"status": "completed", "code": code})
+        self._ok(data)
 
     def _route_get(self) -> None:
         path = urlparse(self.path).path
         path = _normalize_activation_path(path)
         # GET /sdk-api/activation/{code}
+        # D6: the {code} segment must be exactly 8 chars of the Crockford
+        # alphabet; anything else -> 404 code_not_found.
         m = re.match(r"^/sdk-api/activation/([A-Z0-9]{1,16})$", path)
+        if m and not CODE_RE.match(m.group(1)):
+            raise _ApiError(404, "code_not_found",
+                            "no such endpoint")
         if not m:
             raise _ApiError(404, "code_not_found", "no such endpoint")
         key_id = self._key_id()
