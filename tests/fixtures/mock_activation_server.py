@@ -56,6 +56,16 @@ this mock's behaviour:
       whips (int >= 0) and flowing (1 or -1) remain REQUIRED. GET after
       completion returns sensie = {whips, flowing, agreement} with
       agreement == null when it was not provided.
+  N1  POST /sdk-api/trial/consent rejects with 400 invalid_payload unless
+      the request's consent_version exactly matches an entry in the
+      SDK_ACCEPTED_CONSENT_VERSIONS allowlist. Unset / empty allowlist
+      means every consent is rejected — the path is inert until
+      allowlisted. Allowlist entries are comma-separated, trimmed on
+      the server side; the request side is matched exactly (untrimmed,
+      case-sensitive); the check runs AFTER the D5 length/char check,
+      so a length violation never tells the caller which version they
+      were close to. Mirrors sdk-api/supabase/functions/_shared/
+      activation.ts (commit c69f184).
 
 Endpoints (all under /sdk-api/...):
     POST  /sdk-api/trial/consent              auth: x-api-key (trial key)
@@ -138,6 +148,15 @@ MAX_OUTSTANDING_CODES = 3
 # to the earliest outstanding code's TTL; mock uses a static 60s.
 RATE_LIMITED_RETRY_AFTER = "60"
 
+# N1: consent version allowlist (mirrors sdk-api N1). Unset / empty means
+# the mock rejects every consent with 400 invalid_payload — the consent
+# path is inert until the server is configured with at least one accepted
+# version. Comma-separated; each entry is trimmed on the allowlist side;
+# the request side is matched exactly (untrimmed, case-sensitive), AFTER
+# the D5 length/char check, so a length-violating consent_version never
+# tells the caller which version they were close to.
+MOCK_ACCEPTED_CONSENT_VERSIONS_ENV = "SDK_ACCEPTED_CONSENT_VERSIONS"
+
 # Default knobs; overridable via CLI flags or start_server() kwargs.
 DEFAULT_PORT = 8787
 DEFAULT_TTL_SECONDS = 1800
@@ -174,7 +193,8 @@ class _Store:
     is injectable so tests can advance time without sleeping (C5).
     """
 
-    def __init__(self, ttl_seconds: int, clock=None):
+    def __init__(self, ttl_seconds: int, clock=None,
+                 accepted_consent_versions=None):
         self._ttl = ttl_seconds
         # Wall-clock epoch anchor captured at startup. `now()` returns
         # real Unix epoch seconds (so `_iso()` formats real UTC, e.g.
@@ -195,6 +215,11 @@ class _Store:
         # codes: code -> dict (status, key_id, consent_id, expires_at,
         # created_at, claimed_at, completed_at, device_id, sensie).
         self._codes: Dict[str, Dict[str, Any]] = {}
+        # N1: accepted consent versions. If None, fall back to the
+        # SDK_ACCEPTED_CONSENT_VERSIONS env var at request time (so a
+        # mock started before the env was set still picks up changes).
+        # Default empty -> reject every consent.
+        self._accepted_consent_versions = accepted_consent_versions
 
     # -- clock ------------------------------------------------------------
 
@@ -213,6 +238,27 @@ class _Store:
         formats a new `expires_at` accordingly on the next read.
         """
         self._mock_offset += seconds
+
+    def accepted_consent_versions(self) -> list:
+        """N1: effective allowlist of consent versions.
+
+        Order of precedence:
+          1. Explicit `accepted_consent_versions` passed to the constructor.
+          2. The SDK_ACCEPTED_CONSENT_VERSIONS env var at call time.
+          3. Empty (reject every consent with 400 invalid_payload).
+
+        Each allowlist entry is trimmed on this side; the request is
+        matched exactly (untrimmed, case-sensitive) against the trimmed
+        list, mirroring sdk-api activation.ts:acceptedConsentVersions().
+        """
+        if self._accepted_consent_versions is not None:
+            return self._accepted_consent_versions
+        raw = os.environ.get(MOCK_ACCEPTED_CONSENT_VERSIONS_ENV, "")
+        return [
+            entry.strip()
+            for entry in raw.split(",")
+            if entry.strip()
+        ]
 
     # -- consents ---------------------------------------------------------
 
@@ -238,6 +284,16 @@ class _Store:
             raise _ApiError(400, "invalid_payload",
                             "consent_version must not contain control "
                             "characters")
+        # N1: the server, not the client, decides which consent text is
+        # live. The presented value must match an allowlisted entry
+        # exactly — untrimmed, case-sensitive, AFTER the D5 length/char
+        # check so a length violation never tells the caller which
+        # version they were close to.
+        if consent_version not in self.accepted_consent_versions():
+            raise _ApiError(
+                400, "invalid_payload",
+                "consent_version is not an accepted consent version",
+            )
         with self._lock:
             cid = str(uuid.uuid4())
             self._consents[cid] = {
@@ -713,15 +769,33 @@ class _MockServer(ThreadingHTTPServer):
 
 
 def start_server(port: int = 0, ttl_seconds: int = DEFAULT_TTL_SECONDS,
-                 app_secret: str = DEFAULT_APP_SECRET
+                 app_secret: str = DEFAULT_APP_SECRET,
+                 accepted_consent_versions: Optional[list] = None
                  ) -> Tuple[_MockServer, str]:
     """Start the mock in a background thread.
 
     Returns (server, base_url) where base_url already includes the scheme
     and host:port (e.g. "http://127.0.0.1:54321"). The caller owns the
     server and must eventually call stop_server(server).
+
+    `accepted_consent_versions` (N1, mirrors sdk-api SDK_ACCEPTED_CONSENT_VERSIONS)
+    lets the caller pick the allowlist at construction time. When `None`
+    the mock falls back to the SDK_ACCEPTED_CONSENT_VERSIONS env var at
+    request time; default empty -> reject every consent with 400.
     """
-    store = _Store(ttl_seconds=ttl_seconds)
+    if accepted_consent_versions is None:
+        # Fall back to the env var so callers that only set the env (no
+        # constructor option) still work.
+        raw = os.environ.get(MOCK_ACCEPTED_CONSENT_VERSIONS_ENV, "")
+        accepted_consent_versions = [
+            entry.strip()
+            for entry in raw.split(",")
+            if entry.strip()
+        ]
+    store = _Store(
+        ttl_seconds=ttl_seconds,
+        accepted_consent_versions=accepted_consent_versions,
+    )
     server = _MockServer(
         ("127.0.0.1", int(port)),
         _Handler,
@@ -781,15 +855,33 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
             f"matches {TRIAL_KEY_PREFIX}<64 hex>."
         ),
     )
+    p.add_argument(
+        "--accepted-consent-versions", type=str,
+        default=os.environ.get(MOCK_ACCEPTED_CONSENT_VERSIONS_ENV, ""),
+        help=(
+            "Comma-separated list of consent_version values the mock "
+            "will accept (N1; mirrors SDK_ACCEPTED_CONSENT_VERSIONS). "
+            "Empty (the default) means every consent is rejected with "
+            "400 invalid_payload — the path is inert until allowlisted. "
+            "Defaults to the SDK_ACCEPTED_CONSENT_VERSIONS env var when "
+            "set."
+        ),
+    )
     return p.parse_args(argv)
 
 
 def main(argv: Optional[list] = None) -> int:
     args = _parse_args(argv)
+    accepted = [
+        entry.strip()
+        for entry in args.accepted_consent_versions.split(",")
+        if entry.strip()
+    ]
     server, base_url = start_server(
         port=args.port,
         ttl_seconds=args.ttl_seconds,
         app_secret=args.app_secret,
+        accepted_consent_versions=accepted,
     )
     # Exactly one stdout line on start, so callers (CI, shell pipelines,
     # pytest fixtures that exec the script) can grep for readiness.

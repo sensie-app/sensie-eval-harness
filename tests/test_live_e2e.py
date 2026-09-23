@@ -97,6 +97,16 @@ def _start_mock_with_test_hooks():
     # via os.environ.get, so we set it on the live os.environ. Tests run
     # serially within a single process; we restore in stop_mock().
     os.environ["MOCK_ACTIVATION_ALLOW_TEST_HOOKS"] = "1"
+    # N1: configure the in-process mock's consent_version allowlist to
+    # include the version the real CLI ships with
+    # (live-gesture-v1-draft) so the existing happy paths keep working.
+    # The mock reads this at request time when no constructor option
+    # was passed, mirroring SDK_ACCEPTED_CONSENT_VERSIONS. Tests that
+    # want a CLEAN allowlist (N1 / no-allowlist-rejects-all, near-miss)
+    # call start_server() directly with empty / explicit lists.
+    os.environ["SDK_ACCEPTED_CONSENT_VERSIONS"] = (
+        "v1,live-gesture-v1-draft"
+    )
     server, base_url = _mock.start_server(
         port=0, ttl_seconds=1800, app_secret=APP_SECRET,
     )
@@ -108,6 +118,7 @@ def _stop_mock(server):
         _mock.stop_server(server)
     finally:
         os.environ.pop("MOCK_ACTIVATION_ALLOW_TEST_HOOKS", None)
+        os.environ.pop("SDK_ACCEPTED_CONSENT_VERSIONS", None)
 
 
 def _post_json(url, payload, api_key=TRIAL_KEY, app_secret=None):
@@ -193,7 +204,10 @@ class _CliHarness(unittest.TestCase):
         # even if a developer forgot to unset it.
         self._saved_env = {}
         for var in ("SENSIE_API_KEY", "SENSIE_API_URL",
-                    "MOCK_ACTIVATION_ALLOW_TEST_HOOKS"):
+                    "MOCK_ACTIVATION_ALLOW_TEST_HOOKS",
+                    # N1: save the mock allowlist env so per-test
+                    # overrides can't leak to siblings.
+                    "SDK_ACCEPTED_CONSENT_VERSIONS"):
             self._saved_env[var] = os.environ.get(var)
         os.environ["SENSIE_API_KEY"] = TRIAL_KEY
         # Empty string keeps the fallback to DEFAULT_API_URL out of play
@@ -747,6 +761,297 @@ class TestLiveAgreementOptional(_CliHarness):
             f"a 400 on complete must not flip the code to completed; "
             f"got activation={inner!r}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Case 3c — N1: consent_version allowlist (mirrors sdk-api N1 / commit c69f184)
+# ---------------------------------------------------------------------------
+
+
+class _N1Harness(_CliHarness):
+    """N1 tests start the mock themselves so they can control the
+    allowlist independently. The base harness's setUp also starts a
+    mock (with the default allowlist); we shut it down on entry and
+    start a fresh one with the allowlist we want to test.
+
+    Subclasses set `self._accepted` (a list) and reuse this setUp /
+    tearDown pair. The mock's accept list is fixed for the whole test
+    class (each test in the class shares the same allowlist).
+    """
+
+    _accepted: list = []  # populated by subclasses
+
+    def setUp(self):
+        # Call _CliHarness setUp, which starts a default mock — we'll
+        # tear it down and replace with our own in _restart_mock().
+        super().setUp()
+        self._restart_mock()
+
+    def tearDown(self):
+        # Stop the replacement mock (if different from the harness one)
+        # BEFORE the harness tearDown runs, so the harness doesn't try
+        # to shut down a server we already closed.
+        if getattr(self, "n1_server", None) is not None \
+                and self.n1_server is not self.server:
+            _mock.stop_server(self.n1_server)
+            self.n1_server = None
+        super().tearDown()
+
+    def _restart_mock(self):
+        """Shut down the harness's default mock, start a fresh one with
+        the N1 allowlist this test wants."""
+        # Tear down the harness's default mock; clear the env-var
+        # fallback so the constructor option is the only path.
+        _mock.stop_server(self.server)
+        os.environ.pop("SDK_ACCEPTED_CONSENT_VERSIONS", None)
+        server, base_url = _mock.start_server(
+            port=0, ttl_seconds=1800, app_secret=APP_SECRET,
+            accepted_consent_versions=list(self._accepted),
+        )
+        self.server = server
+        self.base_url = base_url
+        self.n1_server = server
+        os.environ["SENSIE_API_URL"] = base_url
+
+
+class TestLiveN1NoAllowlistRejectsAll(_N1Harness):
+    """N1: with no allowlist configured (env unset + constructor empty),
+    the mock must reject EVERY consent with 400 invalid_payload — even
+    versions that pass D5 length/char validation. Mirrors the sdk-api
+    commit c69f184 default: the consent path is inert until allowlisted.
+    """
+
+    _accepted = []  # empty list -> reject everything
+
+    def test_empty_allowlist_rejects_v1(self):
+        status, body = _post_json(
+            f"{self.base_url}/sdk-api/trial/consent",
+            {"consent_version": "v1",
+             "scope": "live-gesture", "accepted": True},
+        )
+        self.assertEqual(status, 400,
+                         f"empty allowlist must 400 on v1; got {status} {body}")
+        self.assertEqual(body.get("error"), "invalid_payload", body)
+
+    def test_empty_allowlist_rejects_live_gesture_v1_draft(self):
+        # The version the real CLI ships with — must STILL be rejected
+        # when the allowlist is empty. This is the proof that the
+        # allowlist is the gate, not the CLI's CONSENT_VERSION.
+        status, body = _post_json(
+            f"{self.base_url}/sdk-api/trial/consent",
+            {"consent_version": "live-gesture-v1-draft",
+             "scope": "live-gesture", "accepted": True},
+        )
+        self.assertEqual(status, 400, body)
+        self.assertEqual(body.get("error"), "invalid_payload", body)
+
+    def test_empty_allowlist_rejects_any_value(self):
+        # Random values that would otherwise be valid by D5.
+        for version in ("anything", "v100", "live-gesture-v2"):
+            status, body = _post_json(
+                f"{self.base_url}/sdk-api/trial/consent",
+                {"consent_version": version,
+                 "scope": "live-gesture", "accepted": True},
+            )
+            self.assertEqual(
+                status, 400,
+                f"empty allowlist must 400 on {version!r}; got {status} {body}",
+            )
+            self.assertEqual(body.get("error"), "invalid_payload", body)
+
+
+class TestLiveN1NearMissRejected(_N1Harness):
+    """N1: a near-miss consent_version (one char off, case mismatch,
+    extra whitespace) must be rejected with 400 invalid_payload. The
+    match is EXACT — untrimmed, case-sensitive — against the
+    allowlisted entries (which ARE trimmed)."""
+
+    _accepted = ["live-gesture-v1-draft"]
+
+    def test_near_miss_one_char_short_rejected(self):
+        status, body = _post_json(
+            f"{self.base_url}/sdk-api/trial/consent",
+            {"consent_version": "live-gesture-v1-draf",
+             "scope": "live-gesture", "accepted": True},
+        )
+        self.assertEqual(status, 400, body)
+        self.assertEqual(body.get("error"), "invalid_payload", body)
+
+    def test_case_mismatch_rejected(self):
+        # The allowlist has "live-gesture-v1-draft"; an uppercase
+        # "Live-gesture-v1-draft" must NOT match (case-sensitive).
+        status, body = _post_json(
+            f"{self.base_url}/sdk-api/trial/consent",
+            {"consent_version": "Live-gesture-v1-draft",
+             "scope": "live-gesture", "accepted": True},
+        )
+        self.assertEqual(status, 400, body)
+        self.assertEqual(body.get("error"), "invalid_payload", body)
+
+    def test_extra_whitespace_rejected(self):
+        # Allowlist entries are trimmed on the server side, but the
+        # request side is matched EXACTLY (untrimmed). A request with
+        # a leading space is NOT in the allowlist.
+        status, body = _post_json(
+            f"{self.base_url}/sdk-api/trial/consent",
+            {"consent_version": " live-gesture-v1-draft",
+             "scope": "live-gesture", "accepted": True},
+        )
+        self.assertEqual(status, 400, body)
+        self.assertEqual(body.get("error"), "invalid_payload", body)
+
+    def test_exact_match_accepted(self):
+        # Sanity: the allowlisted value itself IS accepted (so the
+        # above rejections aren't an artifact of a broken handler).
+        status, body = _post_json(
+            f"{self.base_url}/sdk-api/trial/consent",
+            {"consent_version": "live-gesture-v1-draft",
+             "scope": "live-gesture", "accepted": True},
+        )
+        self.assertEqual(status, 201, body)
+
+    def test_d5_length_check_runs_before_allowlist(self):
+        # D5 is enforced BEFORE the allowlist check, so a 65-char
+        # version is rejected with the length-check message, not the
+        # allowlist message — otherwise a length-violating request
+        # could leak that the version was "close" to being accepted.
+        status, body = _post_json(
+            f"{self.base_url}/sdk-api/trial/consent",
+            {"consent_version": "v" * 65,
+             "scope": "live-gesture", "accepted": True},
+        )
+        self.assertEqual(status, 400, body)
+        msg = (body.get("message") or "")
+        # The D5 message is the length message, NOT the N1 allowlist
+        # message ("not an accepted consent version").
+        self.assertIn(
+            "characters", msg,
+            f"D5 length check should fire before allowlist; got: {msg!r}",
+        )
+        self.assertNotIn(
+            "not an accepted", msg,
+            f"D5 must precede N1; got allowlist message instead: {msg!r}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Revert-to-prove — mock-only N1 allowlist guarantee
+# ---------------------------------------------------------------------------
+
+
+def _build_lax_create_consent(store):
+    """Return a stand-in for `_Store.create_consent` with the N1
+    allowlist check stripped out. Everything else (accepted, scope,
+    D5 length/char) stays. The original N1 check is the ONLY thing
+    that distinguishes this lax version from the real one.
+
+    The returned function takes the same positional args as the real
+    `_Store.create_consent` (key_id, consent_version, scope, accepted)
+    and uses the captured `store` for state — mirroring the existing
+    revert-to-prove pattern in TestRevertToProveAtomicComplete.
+    """
+    from tests.fixtures import mock_activation_server as _mod
+    _ApiError = _mod._ApiError
+    import uuid as _uuid
+
+    def lax(key_id, consent_version, scope, accepted):
+        # Re-implement everything the real create_consent does BEFORE
+        # the N1 check, then skip the N1 check entirely. This is a
+        # tight reproduction of the real function's pre-N1 body so a
+        # future refactor that changes one of those gates still
+        # exercises the same lax path.
+        if not isinstance(accepted, bool) or accepted is not True:
+            raise _ApiError(400, "invalid_payload",
+                            "accepted must be literal true")
+        if scope != _mod.CONSENT_SCOPE:
+            raise _ApiError(400, "invalid_payload",
+                            f"scope must be \"{_mod.CONSENT_SCOPE}\"")
+        if not isinstance(consent_version, str) or not consent_version:
+            raise _ApiError(400, "invalid_payload",
+                            "consent_version is required")
+        if (len(consent_version) < _mod.CONSENT_VERSION_MIN
+                or len(consent_version) > _mod.CONSENT_VERSION_MAX):
+            raise _ApiError(400, "invalid_payload",
+                            "consent_version length out of range")
+        if _mod._CONTROL_CHAR_RE.search(consent_version):
+            raise _ApiError(400, "invalid_payload",
+                            "consent_version has control char")
+        # N1 allowlist check INTENTIONALLY OMITTED — this is the
+        # property under test, removed to prove the original
+        # rejection came from the allowlist and nowhere else.
+        with store._lock:
+            cid = str(_uuid.uuid4())
+            store._consents[cid] = {
+                "id": cid,
+                "key_id": key_id,
+                "consent_version": consent_version,
+                "scope": scope,
+                "accepted": True,
+                "consented_at": store._iso(store.now()),
+                "revoked_at": None,
+            }
+            return store._consents[cid]
+
+    return lax
+
+
+class TestRevertToProveN1Allowlist(_N1Harness):
+    """When the mock's N1 allowlist check is removed, a request with a
+    NON-allowlisted consent_version must SUCCEED. We prove the test
+    would go red without that check by monkeypatching the live mock's
+    create_consent in this test process only and showing the near-miss
+    succeeds. With the check intact, the near-miss MUST 400.
+
+    This isolates the property under test from the real CLI: the
+    guarantee lives in the mock, and the mock is what we are
+    protecting.
+    """
+
+    _accepted = ["live-gesture-v1-draft"]
+
+    def test_near_miss_is_rejected_with_check_intact(self):
+        status, body = _post_json(
+            f"{self.base_url}/sdk-api/trial/consent",
+            {"consent_version": "live-gesture-v1-draf",
+             "scope": "live-gesture", "accepted": True},
+        )
+        self.assertEqual(status, 400, body)
+        self.assertEqual(body.get("error"), "invalid_payload", body)
+
+    def test_near_miss_succeeds_when_check_removed(self):
+        """The revert-to-prove pair. Monkey-patch the live mock's
+        create_consent to skip the N1 allowlist check (everything
+        else — D5 length, scope, accepted-literal-true — stays).
+        With the check removed, the near-miss consent must
+        SUCCEED — proving the allowlist (not some other property)
+        is what made the previous test red."""
+        real_create = self.server.store.create_consent
+        lax_create = _build_lax_create_consent(self.server.store)
+        try:
+            # Assign the lax function to the instance attribute. The
+            # handler calls it as `self._store().create_consent(...)`
+            # which dispatches to this attribute; the lax closure has
+            # the store captured so it can read/write the same state.
+            self.server.store.create_consent = lax_create
+            status, body = _post_json(
+                f"{self.base_url}/sdk-api/trial/consent",
+                {"consent_version": "live-gesture-v1-draf",
+                 "scope": "live-gesture", "accepted": True},
+            )
+            self.assertEqual(
+                status, 201,
+                "removing the N1 check should let the near-miss "
+                f"through; got {status} {body}",
+            )
+            # And the same near-miss with case mismatch.
+            status, body = _post_json(
+                f"{self.base_url}/sdk-api/trial/consent",
+                {"consent_version": "Live-gesture-v1-draft",
+                 "scope": "live-gesture", "accepted": True},
+            )
+            self.assertEqual(status, 201, body)
+        finally:
+            self.server.store.create_consent = real_create
 
 
 # ---------------------------------------------------------------------------

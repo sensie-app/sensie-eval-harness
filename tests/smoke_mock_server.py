@@ -42,6 +42,13 @@ mock = _mod  # noqa: F841
 KEY = "sk_sensie_" + "a" * 64
 OTHER_KEY = "sk_sensie_" + "b" * 64
 APP_SECRET = "mock-app-secret"
+# N1: the smoke launches the mock with these consent_version values
+# allowlisted (mirrors SDK_ACCEPTED_CONSENT_VERSIONS). The smoke also
+# covers the empty/near-miss paths separately below — those use a
+# SECOND mock process launched with --accepted-consent-versions "" so
+# the original happy paths keep using the versions the harness
+# actually expects (v1 + live-gesture-v1-draft).
+ACCEPTED_CONSENT_VERSIONS = "v1,live-gesture-v1-draft"
 
 
 def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> None:
@@ -135,7 +142,12 @@ def main() -> int:
          os.path.join(THIS_DIR, "fixtures", "mock_activation_server.py"),
          "--port", str(port),
          "--ttl-seconds", "1800",
-         "--app-secret", APP_SECRET],
+         "--app-secret", APP_SECRET,
+         # N1: mirror SDK_ACCEPTED_CONSENT_VERSIONS so the smoke's
+         # happy-path consent_version values ("v1", "live-gesture-v1-draft")
+         # are allowlisted; the empty/near-miss scenarios below use a
+         # separate mock process.
+         "--accepted-consent-versions", ACCEPTED_CONSENT_VERSIONS],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -151,6 +163,7 @@ def main() -> int:
         base = f"http://127.0.0.1:{port}"
         h = {"x-api-key": KEY}
         ha = {"x-app-secret": APP_SECRET}
+
 
         # --- happy path --------------------------------------------------
 
@@ -894,12 +907,138 @@ def main() -> int:
         _step("case-insensitive lookup (C4)", ok,
               f"HTTP {status}, status={inner_status}")
 
-        # Final tally.
-        if _failed == 0:
-            print(f"\nALL CHECKS PASSED")
-            return 0
-        print(f"\n{_failed} CHECK(S) FAILED")
-        return 1
+        # --- N1: consent version allowlist -------------------------------
+        # The smoke process was launched with --accepted-consent-versions
+        # "v1,live-gesture-v1-draft", so both values must succeed; any
+        # other value (a near-miss, a case mismatch, or a typo) must be
+        # rejected with 400 invalid_payload AFTER the D5 length/char
+        # check. Use a fresh key so we don't disturb the outstanding
+        # counters the rate-limit test depends on.
+        n1_key = "sk_sensie_" + "8" * 64
+        n1_h = {"x-api-key": n1_key}
+
+        # N1: live-gesture-v1-draft is allowlisted (mirrors what the
+        # real CLI ships with) -> 201.
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/consent", n1_h,
+            {"consent_version": "live-gesture-v1-draft",
+             "scope": "live-gesture", "accepted": True},
+        )
+        expect_envelope_ok(
+            "N1: live-gesture-v1-draft accepted (allowlisted)",
+            status, body, 201, ["consent"],
+        )
+
+        # N1: a near-miss version (one char off) is rejected with 400.
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/consent", n1_h,
+            {"consent_version": "live-gesture-v1-draf",
+             "scope": "live-gesture", "accepted": True},
+        )
+        expect_error(
+            "N1: near-miss consent_version rejected (400 invalid_payload)",
+            status, body, 400, "invalid_payload",
+        )
+
+        # N1: case-sensitive (uppercase L in live-gesture-...) is rejected.
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/consent", n1_h,
+            {"consent_version": "Live-gesture-v1-draft",
+             "scope": "live-gesture", "accepted": True},
+        )
+        expect_error(
+            "N1: case-mismatched consent_version rejected (case-sensitive)",
+            status, body, 400, "invalid_payload",
+        )
+
+        # N1: the D5 length check fires BEFORE the allowlist check, so a
+        # 65-char value is rejected with the length message, not the
+        # allowlist message (otherwise a 65-char allowlisted entry
+        # could leak that the version was "close" to being accepted).
+        status, _, body = _hit(
+            "POST", f"{base}/sdk-api/trial/consent", n1_h,
+            {"consent_version": "v" * 65,
+             "scope": "live-gesture", "accepted": True},
+        )
+        expect_error(
+            "N1: 65-char consent_version -> D5 length message, not allowlist",
+            status, body, 400, "invalid_payload",
+        )
+        # Message must reference the D5 length rule, not the allowlist.
+        msg = (body.get("message") or "")
+        ok = "1-64" in msg or "characters" in msg
+        _step(
+            "N1: 65-char rejection cites D5 length, not the allowlist",
+            ok,
+            f"message={msg[:80]!r}",
+        )
+
+        # --- N1: second mock with EMPTY allowlist -------------------------
+        # The first mock was launched with --accepted-consent-versions
+        # "v1,live-gesture-v1-draft" so the happy paths keep working.
+        # This second process launches with an empty allowlist to prove
+        # N1's "no allowlist -> every consent rejected" property holds
+        # against a real subprocess (not just in-process). Mirrors the
+        # sdk-api N1 shape: env unset AND constructor empty -> 400.
+        probe2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe2.bind(("127.0.0.1", 0))
+        port2 = probe2.getsockname()[1]
+        probe2.close()
+
+        env2 = os.environ.copy()
+        env2["MOCK_ACTIVATION_LOG"] = "1"
+        # Explicitly clear SDK_ACCEPTED_CONSENT_VERSIONS so the env-var
+        # fallback path can't accidentally allow something.
+        env2.pop("SDK_ACCEPTED_CONSENT_VERSIONS", None)
+        env2["MOCK_ACTIVATION_ALLOW_TEST_HOOKS"] = "1"
+        proc2 = subprocess.Popen(
+            [sys.executable,
+             os.path.join(THIS_DIR, "fixtures", "mock_activation_server.py"),
+             "--port", str(port2),
+             "--ttl-seconds", "1800",
+             "--app-secret", APP_SECRET,
+             "--accepted-consent-versions", ""],
+            env=env2,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            ready2 = proc2.stdout.readline()
+            if "mock activation server listening on" not in ready2:
+                print(f"second mock did not announce readiness: {ready2!r}")
+                global _failed
+                _failed += 1
+            else:
+                print(f"# {ready2.strip()}")
+                _wait_for_port("127.0.0.1", port2, timeout=5.0)
+                base2 = f"http://127.0.0.1:{port2}"
+
+                # N1: with an empty allowlist, every consent is
+                # rejected with 400 invalid_payload — even values that
+                # would otherwise be valid by D5.
+                for version in ("v1", "live-gesture-v1-draft",
+                                "anything-else"):
+                    status2, _, body2 = _hit(
+                        "POST", f"{base2}/sdk-api/trial/consent",
+                        {"x-api-key": "sk_sensie_" + "9" * 64},
+                        {"consent_version": version,
+                         "scope": "live-gesture", "accepted": True},
+                    )
+                    expect_error(
+                        f"N1: empty allowlist rejects consent_version={version!r}",
+                        status2, body2, 400, "invalid_payload",
+                    )
+        finally:
+            try:
+                proc2.send_signal(signal.SIGINT)
+            except Exception:
+                pass
+            try:
+                proc2.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                proc2.kill()
+
     finally:
         try:
             proc.send_signal(signal.SIGINT)
@@ -909,6 +1048,15 @@ def main() -> int:
             proc.wait(timeout=3.0)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+        # Final tally. (After both mocks have run; placed in `finally`
+        # so the second-mock check fires regardless of the first one's
+        # outcome.)
+        if _failed == 0:
+            print(f"\nALL CHECKS PASSED")
+            return 0
+        print(f"\n{_failed} CHECK(S) FAILED")
+        return 1
 
 
 if __name__ == "__main__":

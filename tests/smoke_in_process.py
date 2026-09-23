@@ -21,8 +21,14 @@ _spec = _ilu.spec_from_file_location(
 mock = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(mock)
 
+# N1: configure the in-process mock's allowlist so the consent
+# endpoint accepts the version we send below. Empty (the default) ->
+# reject every consent. The constructor option is the cleanest path
+# here (no env var to clean up between this script and the wider
+# test suite).
 server, base_url = mock.start_server(
     port=0, ttl_seconds=1800, app_secret="importable-test",
+    accepted_consent_versions=["v1"],
 )
 try:
     # No announcement line when imported — the (server, base_url) return
