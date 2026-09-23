@@ -76,22 +76,25 @@ REAL_READ_CTA = (
 PILOT_CTA = "Pilot inquiries -> mike@joinsensie.com"
 
 CONSENT_VERSION = "live-gesture-v1-draft"
-# Retention period and deletion route are policy decisions this code does not
-# make. Counsel/founder must replace this placeholder before release.
-NEEDS_POLICY_APPROVAL = (
-    "[retention/deletion terms pending Sensie policy approval]"
-)
-# PENDING POLICY SIGN-OFF: this sentence describes how the SomaCheck app itself
-# handles the gesture (including sending motion data to Sensie). Counsel/founder
-# must approve it against the SomaCheck privacy policy before release.
+# This wording, and the retention terms in RETENTION_COPY below, were
+# approved by Mike (mike@joinsensie.com) on 2026-09-21. CONSENT_VERSION
+# stays "-draft" until the separate release gates (device test, secret
+# provisioning, deploy) are cleared — see the draft guard in run_live.
 APP_PRIVACY_SENTENCE = (
-    "The SomaCheck app itself handles your gesture under the SomaCheck "
-    "privacy policy, which includes sending motion data to Sensie."
+    "  The SomaCheck app itself handles your check under the SomaCheck privacy\n"
+    "  policy. That includes sending your motion data, the statement you check, and\n"
+    "  your reading to Sensie, and recording app usage events (for example that you\n"
+    "  linked, completed, or stopped sharing a code; never the code or the values)."
 )
 DO_IT_YOURSELF = (
     "This is a reading of your own gesture. Do the gesture yourself, on your "
     "own phone. Do not give the code to anyone else or use it to collect "
     "another person's reading."
+)
+RETENTION_COPY = (
+    "  Sensie keeps this consent record and the values from your check for up to\n"
+    "  one year, then deletes them. To ask for earlier deletion, email\n"
+    "  mike@joinsensie.com."
 )
 CONSENT_COPY = f"""\
 Live gesture: what you are agreeing to
@@ -105,7 +108,7 @@ What is captured and shared
   counted) and flowing (1 if your reading was Aligned, -1 if it was
   Unaligned). The report also has an optional agreement field; the app does
   not fill it in, so it shows as "not provided".
-  {APP_PRIVACY_SENTENCE}
+{APP_PRIVACY_SENTENCE}
 
 Your choices
   You can stop at any time, before or during the gesture.
@@ -114,7 +117,7 @@ Your choices
   activation code issued. No code exists without it.
 
 How long the values are kept, and how to have them deleted
-  {NEEDS_POLICY_APPROVAL}
+{RETENTION_COPY}
 
 Consent version: {CONSENT_VERSION}
 """
@@ -180,7 +183,9 @@ def print_live_report(read):
     print("Real gesture, done on your phone in the SomaCheck app — "
           "not synthetic data.")
     print(f"  whips:     {read['whips']}")
-    print(f"  flowing:   {read['flowing']}")
+    flowing = read["flowing"]
+    flowing_word = "Aligned" if flowing == 1 else "Unaligned"
+    print(f"  flowing:   {flowing} ({flowing_word})")
     agreement = read.get("agreement")
     print(f"  agreement: {'not provided' if agreement is None else agreement}")
     print("The researcher-facing result is only the values above; raw motion "
@@ -250,7 +255,8 @@ def _api_base_url():
 
 def _is_production_host(base_url):
     prod = urlparse(DEFAULT_API_URL).hostname
-    return (urlparse(base_url).hostname or "").lower() == prod
+    host = (urlparse(base_url).hostname or "").lower().rstrip(".")
+    return host == prod
 
 
 def _client_from_env():
@@ -323,7 +329,8 @@ def _auth_error_exit():
 
 
 def run_api(args, subjects, client, session_id, user_id):
-    """Live mode: post reads to the preflight session, list them back."""
+    """The `--api` path: post reads to the preflight session, list them
+    back. (Not tier-two live mode, run_live — see module docstring.)"""
     # Post reads for held-out (test) subjects — mirrors the offline protocol.
     _, test_subjects = subject_disjoint_split(
         subjects, train_frac=args.train_frac, seed=args.seed

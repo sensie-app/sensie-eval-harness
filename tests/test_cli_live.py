@@ -25,6 +25,7 @@ import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -45,7 +46,7 @@ from sensie_eval.cli import (
     EXIT_NO_KEY,
     EXIT_QUOTA,
     INSTALL_URL,
-    NEEDS_POLICY_APPROVAL,
+    RETENTION_COPY,
     DO_IT_YOURSELF,
     APP_PRIVACY_SENTENCE,
     main,
@@ -173,13 +174,16 @@ class TestConsent(LiveTestCase):
 
     def test_consent_copy_content(self):
         self.assertEqual(CONSENT_VERSION, "live-gesture-v1-draft")
-        self.assertIn(NEEDS_POLICY_APPROVAL, CONSENT_COPY)
-        self.assertIn("pending Sensie policy approval", NEEDS_POLICY_APPROVAL)
+        self.assertIn(RETENTION_COPY, CONSENT_COPY)
+        self.assertIn("up to", RETENTION_COPY)
+        self.assertIn("one year", RETENTION_COPY)
+        self.assertIn("mike@joinsensie.com", RETENTION_COPY)
         for word in ("whips", "flowing", "agreement", "stop at any time",
                      "never receives raw motion", "not provided"):
             self.assertIn(word, CONSENT_COPY)
         self.assertIn(APP_PRIVACY_SENTENCE, CONSENT_COPY)
-        self.assertIn("sending motion data to Sensie", CONSENT_COPY)
+        self.assertIn("sending your motion data", CONSENT_COPY)
+        self.assertIn("recording app usage events", CONSENT_COPY)
 
     def test_consent_copy_makes_no_false_raw_motion_claim(self):
         for phrase in ("never sent anywhere", "stays on the phone",
@@ -221,6 +225,18 @@ class TestDraftConsentGuard(LiveTestCase):
             self.assertIn("cannot be recorded against production", err)
             self.assertNotIn("Live gesture: what you are agreeing to", out)
             self.assertEqual(client.method_calls, [])
+
+    def test_production_host_with_trailing_dot_refused(self):
+        client = make_client([act("completed", READ)])
+        env = {"SENSIE_API_KEY": FAKE_KEY,
+               "SENSIE_API_URL": DEFAULT_API_URL.replace(
+                   urlparse(DEFAULT_API_URL).hostname,
+                   urlparse(DEFAULT_API_URL).hostname + ".")}
+        code, out, err = self.invoke(["run", "--live", "--yes"], client,
+                                     env=env)
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be recorded against production", err)
+        self.assertEqual(client.method_calls, [])
 
     def test_local_host_allowed(self):
         client = make_client([act("completed", READ)])
@@ -295,7 +311,7 @@ class TestUpfrontAndPolling(LiveTestCase):
         self.assertEqual(code, 0)
         self.assertIn("Your live read", out)
         self.assertIn("whips:     3", out)
-        self.assertIn("flowing:   1", out)
+        self.assertIn("flowing:   1 (Aligned)", out)
         self.assertIn("agreement: 2", out)
         self.assertNotIn("not provided", out.split("Your live read")[1])
         self.assertIn("raw motion is never shared with the researcher", out)
@@ -303,6 +319,13 @@ class TestUpfrontAndPolling(LiveTestCase):
         self.assertNotIn("SYNTHETIC", out)
         self.assertNotIn("annotator", out.split("Your live read")[1])
         self.assertNotIn("Route accordingly", out)
+
+    def test_unaligned_flowing_renders_with_label(self):
+        read = {"whips": 1, "flowing": -1, "agreement": -1}
+        client = make_client([act("completed", read)])
+        code, out, _ = self.invoke(["run", "--live", "--yes"], client)
+        self.assertEqual(code, 0)
+        self.assertIn("flowing:   -1 (Unaligned)", out)
 
     def test_null_agreement_renders_not_provided(self):
         client = make_client([act("completed", READ_NO_AGREEMENT)])
@@ -376,8 +399,16 @@ class TestStatusCommand(LiveTestCase):
         client = make_client([act("completed", READ)])
         code, out, _ = self.invoke(["status", CODE], client)
         self.assertEqual(code, 0)
+        self.assertIn("flowing:   1 (Aligned)", out)
         self.assertIn("agreement: 2", out)
         self.assertNotIn("not provided", out)
+
+    def test_completed_unaligned_flowing_renders_with_label(self):
+        read = {"whips": 1, "flowing": -1, "agreement": -1}
+        client = make_client([act("completed", read)])
+        code, out, _ = self.invoke(["status", CODE], client)
+        self.assertEqual(code, 0)
+        self.assertIn("flowing:   -1 (Unaligned)", out)
 
     def test_completed_null_agreement_renders_not_provided(self):
         client = make_client([act("completed", READ_NO_AGREEMENT)])

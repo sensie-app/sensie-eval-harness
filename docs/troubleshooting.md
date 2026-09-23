@@ -72,6 +72,6 @@ Upgrade pip first (`python3 -m pip install --upgrade pip`) so it pulls prebuilt 
 The trial surface accepts only scalar summaries, so there's nothing to fake here. In production, classification runs server-side on involuntary micro-dynamics of gesture motion — the signal degrades when engagement degrades, which is precisely what it's for.
 
 **Does the harness phone home?**
-No. Offline mode (`sensie-eval run`) makes zero network calls. Live mode calls exactly the three documented endpoints, only when you pass `--api`, and sends only the documented scalar fields. The tier-two path (`--live`, `status`) is likewise opt-in and calls only the endpoints listed in [live-mode.md](live-mode.md).
+No. Offline mode (`sensie-eval run`) makes zero network calls. The `--api` path (`sensie-eval run --api`) calls exactly the three documented endpoints and sends only the documented scalar fields. The tier-two live mode path (`--live`, `status`) is likewise opt-in and calls only the endpoints listed in [live-mode.md](live-mode.md).
 
 Still stuck? mike@joinsensie.com — include the command you ran and the full output.

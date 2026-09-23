@@ -23,7 +23,7 @@ The researcher running this command never receives raw motion, the statement you
 
 The report also has an optional `agreement` field (the [`sensie` endpoint](api-reference.md#post-sdk-apisessionsessionidsensie) accepts `-1`, `1` or `2`). The app does not fill it in, so the CLI prints `agreement: not provided` (never `0` or any default) and nothing it prints is derived from agreement.
 
-The SomaCheck app itself handles your gesture under the SomaCheck privacy policy, which includes sending motion data to Sensie. <!-- PENDING POLICY SIGN-OFF: counsel/founder must approve this sentence. -->
+The SomaCheck app itself handles your check under the SomaCheck privacy policy. That includes sending your motion data, the statement you check, and your reading to Sensie, and recording app usage events (for example that you linked, completed, or stopped sharing a code; never the code or the values). <!-- Approved by Mike on 2026-09-21, along with the retention terms below. -->
 
 This is a reading of your own gesture. Do the gesture yourself, on your own phone. Do not give the code to anyone else or use it to collect another person's reading.
 
@@ -31,7 +31,7 @@ You can stop at any time.
 
 Consent is collected **in the terminal, before a code exists**. The CLI prints the consent text and asks for a yes; only then does it record your consent with Sensie and request a code. If you say no, nothing is sent.
 
-> **Draft consent text.** Consent version `live-gesture-v1-draft`. The retention period and deletion route are not final: the text currently reads `[retention/deletion terms pending Sensie policy approval]` until Sensie's policy is approved.
+> **Draft consent version.** Consent version `live-gesture-v1-draft`. The consent wording and retention terms are approved (Mike, 2026-09-21): Sensie keeps the consent record and the values from your check for up to one year, then deletes them; email mike@joinsensie.com to ask for earlier deletion. The version stays `-draft` until the separate release gates (device test, secret provisioning, deploy) are cleared.
 
 ## Run it
 
@@ -39,6 +39,11 @@ Consent is collected **in the terminal, before a code exists**. The CLI prints t
 $ export SENSIE_API_KEY=sk_sensie_your_key_here
 $ sensie-eval run --live
 ```
+
+`run --live` currently exits 2 against production: the consent version
+(`live-gesture-v1-draft`) is still a draft, and the CLI refuses to record a
+draft consent version against the production API. It works against a
+non-production `SENSIE_API_URL` (e.g. local/staging) in the meantime.
 
 The CLI then:
 
@@ -57,7 +62,7 @@ Your live read
 ----------------------------------------
 Real gesture, done on your phone in the SomaCheck app — not synthetic data.
   whips:     3
-  flowing:   1
+  flowing:   1 (Aligned)
   agreement: not provided
 The researcher-facing result is only the values above; raw motion is never shared with the researcher.
 ```
@@ -130,4 +135,4 @@ Live mode calls, and only calls:
 - `POST /sdk-api/trial/activation-code`
 - `GET /sdk-api/activation/{code}`
 
-The phone talks to the API separately to claim the code and report the three values. Set `SENSIE_API_URL` to point the CLI at another environment (see the [quickstart](quickstart.md#pointing-at-a-different-environment)).
+The phone talks to the API separately to claim the code and report the two required values (`whips`, `flowing`) plus the optional `agreement`. Set `SENSIE_API_URL` to point the CLI at another environment (see the [quickstart](quickstart.md#pointing-at-a-different-environment)).
