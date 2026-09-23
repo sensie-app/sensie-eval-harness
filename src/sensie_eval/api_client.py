@@ -9,6 +9,9 @@ Endpoints (base URL = SENSIE_API_URL, default production):
     POST {base}/sdk-api/session                       — create a session
     POST {base}/sdk-api/session/{id}/sensie           — post one read (metered)
     GET  {base}/sdk-api/session/{id}/sensie           — list reads in a session
+    POST {base}/sdk-api/trial/consent                 — record live-gesture consent
+    POST {base}/sdk-api/trial/activation-code         — issue an 8-char activation code
+    GET  {base}/sdk-api/activation/{code}             — read back a code's status
 
 Every request carries the customer's trial key in an `x-api-key` header
 (format: sk_sensie_<64 hex>).
@@ -20,6 +23,7 @@ gyroscope arrays. Trial-tier requests carry only scalar summary values
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Dict, List, Optional
 
@@ -69,6 +73,37 @@ class SensieQuotaError(SensieApiError):
         return self.headers.get("Retry-After")
 
 
+class SensieConsentRequiredError(SensieApiError):
+    """403 consent_required — the consent id is missing, unknown, revoked,
+    or belongs to a different key."""
+
+
+class SensieRateLimitedError(SensieApiError):
+    """429 with error == "rate_limited" — too many outstanding activation
+    codes on this key. Distinct from SensieQuotaError (error ==
+    "quota_exceeded"); clients switch on the body `error`, not the status."""
+
+    @property
+    def retry_after(self) -> Optional[str]:
+        return self.headers.get("Retry-After")
+
+
+class SensieActivationNotFoundError(SensieApiError):
+    """404 on an activation path — unknown code, or a code issued to a
+    different key (the API never reveals which)."""
+
+
+class SensieActivationGoneError(SensieApiError):
+    """410 — the code can no longer be used.
+
+    `.reason` is the body `error`: "code_expired" or "code_already_claimed".
+    """
+
+    @property
+    def reason(self) -> Optional[str]:
+        return self.body.get("error")
+
+
 class SensieApiClient:
     """Thin JSON-over-HTTP client for the Sensie SDK API."""
 
@@ -105,11 +140,25 @@ class SensieApiClient:
                 body = json.loads(raw)
             except (json.JSONDecodeError, ValueError):
                 body = {"raw": raw}
+            if not isinstance(body, dict):
+                body = {"raw": raw}
             resp_headers = dict(exc.headers.items()) if exc.headers else {}
             if exc.code == 401:
                 raise SensieAuthError(exc.code, body, resp_headers) from None
             if exc.code == 429:
+                if body.get("error") == "rate_limited":
+                    raise SensieRateLimitedError(
+                        exc.code, body, resp_headers) from None
                 raise SensieQuotaError(exc.code, body, resp_headers) from None
+            if exc.code == 403 and body.get("error") == "consent_required":
+                raise SensieConsentRequiredError(
+                    exc.code, body, resp_headers) from None
+            if exc.code == 404 and path.startswith("/sdk-api/activation/"):
+                raise SensieActivationNotFoundError(
+                    exc.code, body, resp_headers) from None
+            if exc.code == 410:
+                raise SensieActivationGoneError(
+                    exc.code, body, resp_headers) from None
             raise SensieApiError(exc.code, body, resp_headers) from None
 
     def create_session(self, user_id: str, sdk_version: str) -> Dict:
@@ -150,3 +199,34 @@ class SensieApiClient:
             "GET", f"/sdk-api/session/{session_id}/sensie"
         )
         return response["data"]["sensies"]
+
+    def post_consent(self, consent_version: str) -> Dict:
+        """POST /sdk-api/trial/consent — record live-gesture consent.
+
+        Returns the consent dict ({id, consented_at}). Must precede
+        request_activation_code: the API issues no code without a consent id.
+        """
+        response = self._request("POST", "/sdk-api/trial/consent", {
+            "consent_version": consent_version,
+            "scope": "live-gesture",
+            "accepted": True,
+        })
+        return response["data"]["consent"]
+
+    def request_activation_code(self, consent_id: str) -> Dict:
+        """POST /sdk-api/trial/activation-code — returns the activation dict
+        ({code, expires_at, install_url})."""
+        response = self._request("POST", "/sdk-api/trial/activation-code", {
+            "consent_id": consent_id,
+        })
+        return response["data"]["activation"]
+
+    def get_activation(self, code: str) -> Dict:
+        """GET /sdk-api/activation/{code} — returns the activation dict
+        ({status, sensie, expires_at}); `sensie` is None until completed.
+
+        A lapsed code is HTTP 200 with status "expired", not an error.
+        """
+        code = urllib.parse.quote(code.strip().upper(), safe="")
+        response = self._request("GET", f"/sdk-api/activation/{code}")
+        return response["data"]["activation"]

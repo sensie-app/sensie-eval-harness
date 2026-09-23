@@ -5,6 +5,10 @@ Commands:
     sensie-eval run           Offline synthetic evaluation (default; no network).
     sensie-eval run --api     Same evaluation, then posts scalar summary reads
                               to the Sensie live API and lists them back.
+    sensie-eval run --live    Tier two: record consent, issue an activation
+                              code, and wait for a real gesture done in the
+                              SomaCheck app (see docs/live-mode.md).
+    sensie-eval status CODE   One check on an activation code (resume path).
     sensie-eval version       Print the harness version.
 
 Live mode environment:
@@ -14,6 +18,7 @@ Live mode environment:
 
 Exit codes (live mode):
     75  quota exhausted (HTTP 429)
+    76  activation code expired — no result was produced
     77  authentication failed (HTTP 401)
     78  SENSIE_API_KEY not set
 
@@ -28,14 +33,21 @@ import hashlib
 import os
 import socket
 import sys
+import time
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from sensie_eval import __version__
 from sensie_eval.api_client import (
     DEFAULT_API_URL,
+    SensieActivationGoneError,
+    SensieActivationNotFoundError,
     SensieApiClient,
     SensieApiError,
     SensieAuthError,
+    SensieConsentRequiredError,
     SensieQuotaError,
+    SensieRateLimitedError,
 )
 from sensie_eval.evaluate import (
     classify_subject,
@@ -47,6 +59,7 @@ from sensie_eval.evaluate import (
 from sensie_eval.generate_synthetic_imu import generate_subject_dataset
 
 EXIT_QUOTA = 75
+EXIT_EXPIRED = 76
 EXIT_AUTH = 77
 EXIT_NO_KEY = 78
 
@@ -61,6 +74,66 @@ REAL_READ_CTA = (
     f"Get the app: {INSTALL_URL}"
 )
 PILOT_CTA = "Pilot inquiries -> mike@joinsensie.com"
+
+CONSENT_VERSION = "live-gesture-v1-draft"
+# This wording, and the retention terms in RETENTION_COPY below, were
+# approved by Mike (mike@joinsensie.com) on 2026-09-21. CONSENT_VERSION
+# stays "-draft" until the separate release gates (device test, secret
+# provisioning, deploy) are cleared — see the draft guard in run_live.
+APP_PRIVACY_SENTENCE = (
+    "  The SomaCheck app itself handles your check under the SomaCheck privacy\n"
+    "  policy. That includes sending your motion data, the statement you check, and\n"
+    "  your reading to Sensie, and recording app usage events (for example that you\n"
+    "  linked, completed, or stopped sharing a code; never the code or the values)."
+)
+DO_IT_YOURSELF = (
+    "This is a reading of your own gesture. Do the gesture yourself, on your "
+    "own phone. Do not give the code to anyone else or use it to collect "
+    "another person's reading."
+)
+RETENTION_COPY = (
+    "  Sensie keeps this consent record and the values from your check for up to\n"
+    "  one year, then deletes them. To ask for earlier deletion, email\n"
+    "  mike@joinsensie.com."
+)
+CONSENT_COPY = f"""\
+Live gesture: what you are agreeing to
+{"-" * 40}
+This step uses a real gesture, done on a phone in the SomaCheck app.
+
+What is captured and shared
+  The researcher running this command never receives raw motion, the
+  statement you check, or your account details. They receive two values the
+  app derives from your gesture: whips (how many gesture movements were
+  counted) and flowing (1 if your reading was Aligned, -1 if it was
+  Unaligned). The report also has an optional agreement field; the app does
+  not fill it in, so it shows as "not provided".
+{APP_PRIVACY_SENTENCE}
+
+Your choices
+  You can stop at any time, before or during the gesture.
+  {DO_IT_YOURSELF}
+  Saying yes here records your consent with Sensie first; only then is an
+  activation code issued. No code exists without it.
+
+How long the values are kept, and how to have them deleted
+{RETENTION_COPY}
+
+Consent version: {CONSENT_VERSION}
+"""
+
+# The activation code's lifetime, from the API contract (C4).
+CODE_TTL_MINUTES = 30
+DEFAULT_POLL_INTERVAL = 10.0
+DEFAULT_TIMEOUT_MINUTES = 30.0
+EXIT_INTERRUPTED = 130
+# Consecutive network failures tolerated while polling before giving up.
+MAX_POLL_NETWORK_FAILURES = 6
+
+STATUS_LINES = {
+    "pending": "waiting for the code to be entered in the SomaCheck app",
+    "claimed": "code entered in the app — calibration and gesture in progress",
+}
 
 
 def default_user_id() -> str:
@@ -101,8 +174,33 @@ def derive_reads(subjects, n_reads: int, threshold: float):
     return reads
 
 
-def print_routing_report(reads):
-    """Render a synthetic cohort-routing preview from the posted scalars."""
+def print_live_report(read):
+    """Render one real, self-read gesture. Deliberately not the routing
+    report: no clear/calibrating verdict, since nothing here is an annotator
+    being routed and the reading does not evaluate or gate the person."""
+    print("\nYour live read")
+    print("-" * 40)
+    print("Real gesture, done on your phone in the SomaCheck app — "
+          "not synthetic data.")
+    print(f"  whips:     {read['whips']}")
+    flowing = read["flowing"]
+    flowing_word = "Aligned" if flowing == 1 else "Unaligned"
+    print(f"  flowing:   {flowing} ({flowing_word})")
+    agreement = read.get("agreement")
+    print(f"  agreement: {'not provided' if agreement is None else agreement}")
+    print("The researcher-facing result is only the values above; raw motion "
+          "is never shared with the researcher.")
+
+
+def print_routing_report(reads, live=False):
+    """Render a synthetic cohort-routing preview from the posted scalars.
+
+    live=True renders one real read via print_live_report instead — the
+    synthetic-demo wording never applies to a real gesture.
+    """
+    if live:
+        print_live_report(reads[0])
+        return
     clear = sum(
         read["whips"] >= 2
         and read["flowing"] == 1
@@ -151,13 +249,19 @@ def run_offline(args):
     return subjects
 
 
-def api_preflight(args):
-    """Verify the API key up front with one unmetered call (session create),
-    so a bad key fails in one round-trip instead of after the offline eval.
-    The session is reused by run_api — no extra session, no metered calls.
+def _api_base_url():
+    return os.environ.get("SENSIE_API_URL", DEFAULT_API_URL)
 
-    Returns (client, session_id, user_id), or an int exit code on failure.
-    """
+
+def _is_production_host(base_url):
+    prod = urlparse(DEFAULT_API_URL).hostname
+    host = (urlparse(base_url).hostname or "").lower().rstrip(".")
+    return host == prod
+
+
+def _client_from_env():
+    """Build the API client from SENSIE_API_KEY / SENSIE_API_URL, or return
+    EXIT_NO_KEY (after printing how to get a key) when the key is unset."""
     api_key = os.environ.get("SENSIE_API_KEY")
     if not api_key:
         print("Error: SENSIE_API_KEY is not set.", file=sys.stderr)
@@ -165,10 +269,20 @@ def api_preflight(args):
               file=sys.stderr)
         print("  export SENSIE_API_KEY=sk_sensie_...", file=sys.stderr)
         return EXIT_NO_KEY
+    return SensieApiClient(api_key=api_key, base_url=_api_base_url())
 
-    base_url = os.environ.get("SENSIE_API_URL", DEFAULT_API_URL)
+
+def api_preflight(args):
+    """Verify the API key up front with one unmetered call (session create),
+    so a bad key fails in one round-trip instead of after the offline eval.
+    The session is reused by run_api — no extra session, no metered calls.
+
+    Returns (client, session_id, user_id), or an int exit code on failure.
+    """
+    client = _client_from_env()
+    if isinstance(client, int):
+        return client
     user_id = args.user_id or default_user_id()
-    client = SensieApiClient(api_key=api_key, base_url=base_url)
 
     try:
         session = client.create_session(user_id, sdk_version=__version__)
@@ -215,7 +329,8 @@ def _auth_error_exit():
 
 
 def run_api(args, subjects, client, session_id, user_id):
-    """Live mode: post reads to the preflight session, list them back."""
+    """The `--api` path: post reads to the preflight session, list them
+    back. (Not tier-two live mode, run_live — see module docstring.)"""
     # Post reads for held-out (test) subjects — mirrors the offline protocol.
     _, test_subjects = subject_disjoint_split(
         subjects, train_frac=args.train_frac, seed=args.seed
@@ -259,6 +374,251 @@ def run_api(args, subjects, client, session_id, user_id):
         return 1
 
 
+def _seconds_remaining(expires_at):
+    """Whole seconds until `expires_at` (ISO 8601), or None if unparseable."""
+    if not expires_at:
+        return None
+    try:
+        expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return max(0, int((expiry - datetime.now(timezone.utc)).total_seconds()))
+
+
+def _format_remaining(expires_at):
+    seconds = _seconds_remaining(expires_at)
+    if not seconds:  # unparseable, or local clock says lapsed: say nothing
+        return ""
+    minutes, secs = divmod(seconds, 60)
+    return f" ({minutes}m {secs:02d}s left on the code)"
+
+
+def _resume_hint(code, expires_at=None):
+    print(f"Run `sensie-eval status {code}` to check back later.")
+    left = _format_remaining(expires_at)
+    if left:
+        print(f"The code is still valid{left}.")
+
+
+def _network_error_exit(exc):
+    print(f"\nCould not reach the Sensie API: {exc}", file=sys.stderr)
+    return 1
+
+
+def _live_error_exit(exc):
+    """Map an API error from the live path to a plain message + exit code."""
+    if isinstance(exc, SensieQuotaError):
+        return _quota_error_exit(exc)
+    if isinstance(exc, SensieAuthError):
+        return _auth_error_exit()
+    if isinstance(exc, SensieConsentRequiredError):
+        print("\nThe API did not accept the consent record "
+              "(HTTP 403, consent_required).", file=sys.stderr)
+        print("  No activation code was issued. Run `sensie-eval run --live` "
+              "again to give consent afresh.", file=sys.stderr)
+        return 1
+    if isinstance(exc, SensieRateLimitedError):
+        print("\nToo many activation codes are already waiting on this key "
+              "(HTTP 429, rate_limited).", file=sys.stderr)
+        print("  Finish one, or let one expire, then try again. Check an "
+              "existing code with `sensie-eval status <code>`.",
+              file=sys.stderr)
+        if exc.retry_after:
+            print(f"  Retry after: {exc.retry_after} seconds", file=sys.stderr)
+        return 1
+    if isinstance(exc, SensieActivationNotFoundError):
+        print("\nNo activation code with that value was found for this key "
+              "(HTTP 404, code_not_found).", file=sys.stderr)
+        print("  Check the 8 characters, and that SENSIE_API_KEY is the key "
+              "that issued the code.", file=sys.stderr)
+        return 1
+    if isinstance(exc, SensieActivationGoneError):
+        if exc.reason == "code_expired":
+            return _expired_exit()
+        print(f"\nThat code can no longer be used (HTTP 410, {exc.reason}).",
+              file=sys.stderr)
+        return 1
+    print(f"\nAPI error (HTTP {exc.status}): {exc.body}", file=sys.stderr)
+    return 1
+
+
+def _expired_exit():
+    print("\nThis activation code has expired.", file=sys.stderr)
+    print("  No result was produced. Sensie keeps the consent record and the "
+          "expired code; no gesture values were stored.", file=sys.stderr)
+    print("  To try again, run `sensie-eval run --live` for a new code.",
+          file=sys.stderr)
+    return EXIT_EXPIRED
+
+
+def _report_activation(code, activation):
+    """Handle a terminal activation status. Returns the exit code for
+    completed/expired, or None while the code is still pending/claimed."""
+    status = activation.get("status")
+    if status == "completed":
+        sensie = activation.get("sensie")
+        if not sensie:
+            print("\nThe API reported the code as completed but returned no "
+                  "values.", file=sys.stderr)
+            return 1
+        print_routing_report([sensie], live=True)
+        return 0
+    if status == "expired":
+        return _expired_exit()
+    return None
+
+
+def _status_line(status, expires_at):
+    detail = STATUS_LINES.get(status, "")
+    return f"  status: {status}" + (f" — {detail}" if detail else "") \
+        + _format_remaining(expires_at)
+
+
+def wait_for_activation(client, code, interval, timeout_minutes,
+                        expires_at=None):
+    """Poll until the code completes or expires; returns an exit code.
+
+    On --timeout the code is still valid, so this prints the resume hint and
+    returns 0. A status line prints on every change and at least once a
+    minute, so a long wait never looks hung.
+    """
+    deadline = time.monotonic() + timeout_minutes * 60
+    last_status, last_print = None, None
+    failures = 0
+    while True:
+        try:
+            activation = client.get_activation(code)
+            failures = 0
+        except SensieApiError as exc:
+            return _live_error_exit(exc)
+        except OSError as exc:
+            failures += 1
+            if failures >= MAX_POLL_NETWORK_FAILURES:
+                _network_error_exit(exc)
+                _resume_hint(code, expires_at)
+                return 1
+            activation = None
+        if activation is not None:
+            result = _report_activation(code, activation)
+            if result is not None:
+                return result
+            status = activation.get("status")
+            expires_at = activation.get("expires_at") or expires_at
+            now = time.monotonic()
+            if last_print is None or status != last_status \
+                    or now - last_print >= 60:
+                print(_status_line(status, expires_at), flush=True)
+                last_status, last_print = status, now
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"\nStopped waiting after {timeout_minutes:g} minutes.")
+            _resume_hint(code, expires_at)
+            return 0
+        time.sleep(min(interval, remaining))
+
+
+def run_live(args):
+    """Tier two: consent -> activation code -> wait for a real gesture."""
+    if args.api:
+        print("Error: --live and --api are separate paths; pick one.",
+              file=sys.stderr)
+        return 2
+    if args.poll_interval <= 0 or args.timeout <= 0:
+        print("Error: --poll-interval and --timeout must be positive.",
+              file=sys.stderr)
+        return 2
+    client = _client_from_env()
+    if isinstance(client, int):
+        return client
+    if CONSENT_VERSION.endswith("-draft") and _is_production_host(
+            _api_base_url()):
+        print(f"Error: the consent text ({CONSENT_VERSION}) is still a "
+              "draft and cannot be recorded against production. Nothing "
+              "was sent.", file=sys.stderr)
+        return 2
+
+    # Consent is collected here, before any code exists.
+    print(CONSENT_COPY)
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("Error: consent needs a person at the keyboard. Re-run in "
+                  "an interactive terminal, or pass --yes once the person "
+                  "doing the gesture has read the consent text above.",
+                  file=sys.stderr)
+            return 2
+        try:
+            answer = input("Do you consent to this? [y/N] ")
+        except EOFError:
+            answer = ""
+        except KeyboardInterrupt:
+            print("\nNo consent recorded, nothing was sent.")
+            return EXIT_INTERRUPTED
+        if answer.strip().lower() not in ("y", "yes"):
+            print("No consent recorded, nothing was sent.")
+            return 1
+
+    try:
+        consent = client.post_consent(CONSENT_VERSION)
+        activation = client.request_activation_code(consent["id"])
+    except SensieApiError as exc:
+        return _live_error_exit(exc)
+    except OSError as exc:
+        return _network_error_exit(exc)
+    except KeyboardInterrupt:
+        print("\nInterrupted before a code was shown.")
+        return EXIT_INTERRUPTED
+
+    code = activation["code"]
+    expires_at = activation.get("expires_at")
+    print(f"""
+Live gesture: tier two
+{"-" * 40}
+You already ran the offline demo. This one uses a real gesture, so budget
+the time: about 15-20 minutes including calibration. The code is valid for
+{CODE_TTL_MINUTES} minutes.
+
+  1. Install SomaCheck:  {INSTALL_URL}
+  2. Enter this code:    {code}
+     or open this link:  somacheck://activate/{code}
+     Do the gesture yourself, on your own phone. Do not give the code to
+     anyone else or use it to collect another person's reading.
+  3. Do the gesture in the app. The result shows up here.
+
+You are about to hand over a real gesture. The researcher receives only the
+derived values (whips and flowing), never raw motion.
+Press Ctrl-C to stop waiting at any time; the code keeps working until it
+expires.
+""", flush=True)
+    try:
+        return wait_for_activation(client, code, args.poll_interval,
+                                   args.timeout, expires_at)
+    except KeyboardInterrupt:
+        print("\nStopped waiting.")
+        _resume_hint(code, expires_at)
+        return EXIT_INTERRUPTED
+
+
+def run_status(args):
+    """One check on an activation code (the resume path)."""
+    client = _client_from_env()
+    if isinstance(client, int):
+        return client
+    code = args.code.strip().upper()
+    try:
+        activation = client.get_activation(code)
+    except SensieApiError as exc:
+        return _live_error_exit(exc)
+    except OSError as exc:
+        return _network_error_exit(exc)
+    result = _report_activation(code, activation)
+    if result is not None:
+        return result
+    print(_status_line(activation.get("status"), activation.get("expires_at")))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sensie-eval",
@@ -294,6 +654,28 @@ def build_parser() -> argparse.ArgumentParser:
                      help="User id for the API session (default: stable "
                           "auto-generated id for this machine)")
 
+    run.add_argument("--live", action="store_true",
+                     help="Tier two: record consent, get an activation code, "
+                          "and wait for a real gesture done in the SomaCheck "
+                          "app (requires SENSIE_API_KEY)")
+    run.add_argument("--yes", action="store_true",
+                     help="With --live: confirm consent non-interactively, "
+                          "only when you are the person doing the gesture "
+                          "(the consent text is still printed)")
+    run.add_argument("--poll-interval", type=float,
+                     default=DEFAULT_POLL_INTERVAL, metavar="SECONDS",
+                     help="With --live: seconds between status checks "
+                          "(default: 10)")
+    run.add_argument("--timeout", type=float,
+                     default=DEFAULT_TIMEOUT_MINUTES, metavar="MINUTES",
+                     help="With --live: stop waiting after this many minutes; "
+                          "the code stays valid and `status` resumes "
+                          "(default: 30)")
+
+    status = sub.add_parser(
+        "status", help="Check an activation code from `run --live`")
+    status.add_argument("code", help="The 8-character activation code")
+
     sub.add_parser("version", help="Print the harness version")
     return parser
 
@@ -306,7 +688,12 @@ def main(argv=None) -> int:
         print(f"sensie-eval {__version__}")
         return 0
 
+    if args.command == "status":
+        return run_status(args)
+
     if args.command == "run":
+        if args.live:
+            return run_live(args)
         api_ctx = None
         if args.api:
             api_ctx = api_preflight(args)

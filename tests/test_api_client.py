@@ -108,6 +108,24 @@ class TestRequestShape(unittest.TestCase):
         self.assertEqual(request.get_method(), "GET")
         self.assertIsNone(request.data)
 
+    @mock.patch("sensie_eval.api_client.urllib.request.urlopen")
+    def test_get_activation_keeps_null_agreement(self, urlopen):
+        sensie = {"whips": 3, "flowing": 1, "agreement": None}
+        urlopen.return_value = fake_response({
+            "status": "success",
+            "data": {"activation": {
+                "status": "completed", "sensie": sensie,
+                "expires_at": "2099-01-01T00:00:00Z"}},
+        })
+        client = SensieApiClient(api_key=KEY, base_url=BASE)
+        activation = client.get_activation("abcd2345")
+
+        self.assertEqual(activation["sensie"], sensie)
+        self.assertIsNone(activation["sensie"]["agreement"])
+        request = urlopen.call_args[0][0]
+        self.assertEqual(request.full_url,
+                         f"{BASE}/sdk-api/activation/ABCD2345")
+
 
 class TestPayloadValidation(unittest.TestCase):
 
