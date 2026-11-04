@@ -3,6 +3,18 @@
 All notable changes to `sensie-eval` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.3] - 2026-11-04
+
+- Live mode (tier two): `run --live` and `status` drive real-gesture
+  activation through the activation endpoints in `api_client.py`; consent and
+  report copy landed per the review gate, and draft consent is refused
+  against production. Guide in `docs/live-mode.md`.
+- Success CTAs and the install bridge after a completed run; the install
+  link is the stable `go.somacheck.com/install`.
+- Releases now publish to PyPI through GitHub Trusted Publishing (OIDC)
+  instead of a stored API token. This is the first release on that path.
+- Docs: fixed the pilot anchor and stale test count; added this changelog.
+
 ## [0.1.2] — 2026-07-13
 
 - `run --api` now prints a clearly-labeled synthetic routing report after

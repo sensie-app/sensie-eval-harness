@@ -8,7 +8,7 @@ Public API:
     classify_subject, evaluate_subject_disjoint, print_report
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 from sensie_eval.generate_synthetic_imu import (
     generate_gesture_template,
